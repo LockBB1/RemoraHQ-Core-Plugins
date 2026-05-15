@@ -1,0 +1,17 @@
+{
+  "name": "RemoraHQ - Core",
+  "shortName": "RemoraHQ-Core-Plugins",
+  "version": "0.1.0",
+  "description": "RemoraHQ infrastructure shell. Exposes a ping action used by the RemoraHQ UI to verify the plugin channel end-to-end. Subsequent RemoraHQ plugins (Alert State, Auditor, Reports, Terminal Bridge) extend this core.",
+  "hasAdminPanel": false,
+  "homepage": "https://github.com/MeshHQ/RemoraHQ-Core-Plugins",
+  "changelogUrl": "https://github.com/MeshHQ/RemoraHQ-Core-Plugins/releases",
+  "configUrl": "https://raw.githubusercontent.com/MeshHQ/RemoraHQ-Core-Plugins/main/config.json",
+  "downloadUrl": "https://github.com/MeshHQ/RemoraHQ-Core-Plugins/releases/latest/download/RemoraHQ-Core-Plugins.zip",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:MeshHQ/RemoraHQ-Core-Plugins.git"
+  },
+  "meshCentralCompat": ">=1.1.56",
+  "versionHistoryUrl": "https://github.com/MeshHQ/RemoraHQ-Core-Plugins/releases.atom"
+}

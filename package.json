@@ -1,0 +1,14 @@
+{
+  "name": "remorahq-core-plugins",
+  "version": "0.1.0",
+  "description": "RemoraHQ Core MeshCentral plugin",
+  "main": "RemoraHQ-Core-Plugins.js",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MeshHQ/RemoraHQ-Core-Plugins.git"
+  },
+  "engines": {
+    "meshcentral": ">=1.1.56"
+  }
+}
