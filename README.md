@@ -68,12 +68,6 @@ Enable the plugin runtime in `meshcentral-data/config.json`:
 Restart MeshCentral. The plugin should appear on `Admin → Plugins` in
 RemoraHQ and in the upstream MeshCentral plugin admin page.
 
-## Smoke
-
-1. Open RemoraHQ as Super Admin → `Admin → Plugins`.
-2. Find `RemoraHQ - Core`, click `Send ping`.
-3. Toast should show `pong v0.1.0 / <server-time>` within ~1s.
-
 ## License
 
 Apache-2.0 (matches MeshCentral). See `LICENSE`.

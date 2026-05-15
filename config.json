@@ -7,11 +7,11 @@
   "homepage": "https://github.com/lockbb1/RemoraHQ-Core-Plugins",
   "changelogUrl": "https://github.com/lockbb1/RemoraHQ-Core-Plugins/releases",
   "configUrl": "https://raw.githubusercontent.com/lockbb1/RemoraHQ-Core-Plugins/main/config.json",
-  "downloadUrl": "https://github.com/lockbb1/RemoraHQ-Core-Plugins/releases/latest/download/RemoraHQ-Core-Plugins.zip",
+  "downloadUrl": "https://github.com/lockbb1/RemoraHQ-Core-Plugins/archive/refs/heads/main.zip",
   "repository": {
     "type": "git",
-    "url": "git@github.com:lockbb1/RemoraHQ-Core-Plugins.git"
+    "url": "https://github.com/lockbb1/RemoraHQ-Core-Plugins.git"
   },
   "meshCentralCompat": ">=1.1.56",
-  "versionHistoryUrl": "https://github.com/lockbb1/RemoraHQ-Core-Plugins/releases.atom"
+  "versionHistoryUrl": "https://api.github.com/repos/lockbb1/RemoraHQ-Core-Plugins/tags"
 }
