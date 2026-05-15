@@ -2,17 +2,19 @@
  * RemoraHQ - Core MeshCentral plugin.
  *
  * MeshCentral loads this file via pluginHandler.js as:
- *     require('<pluginPath>/RemoraHQ-Core-Plugins/RemoraHQ-Core-Plugins.js')['RemoraHQ-Core-Plugins'](parent);
+ *     require('<pluginPath>/remoraCore/remoraCore.js').remoraCore(parent);
  *
- * The bracket-notation export is required because the shortName carries
- * hyphens (matching the upstream repo folder name).
+ * The shortName is a clean camelCase JS identifier (no hyphens) — Mesh injects
+ * `obj.<shortName>` into client-side JS via dot-notation, so any hyphen in
+ * shortName produces a SyntaxError that breaks the entire frontend.
  *
  * Wire protocol (RemoraHQ ↔ Mesh ↔ this plugin):
- *   client → server: { action:'plugin', plugin:'RemoraHQ-Core-Plugins',
- *                      pluginaction:'<verb>', tag:'<correlation>', responseid:'<correlation>',
- *                      ...payload }
- *   server → client: { action:'plugin', plugin:'RemoraHQ-Core-Plugins',
- *                      pluginaction:'<verb>', tag, responseid, result:'ok'|'error', ...data }
+ *   client → server: { action:'plugin', plugin:'remoraCore',
+ *                      pluginaction:'<verb>', tag:'<correlation>',
+ *                      responseid:'<correlation>', ...payload }
+ *   server → client: { action:'plugin', plugin:'remoraCore',
+ *                      pluginaction:'<verb>', tag, responseid,
+ *                      result:'ok'|'error', ...data }
  *
  * The RemoraHQ MeshCentralTransport matches responses purely by `tag`/`responseid`,
  * so action/pluginaction echo is informational. We still echo both to keep traces
@@ -21,10 +23,10 @@
 
 'use strict';
 
-var PLUGIN_SHORT_NAME = 'RemoraHQ-Core-Plugins';
-var PLUGIN_VERSION = '0.1.0';
+var PLUGIN_SHORT_NAME = 'remoraCore';
+var PLUGIN_VERSION = '0.1.1';
 
-module.exports[PLUGIN_SHORT_NAME] = function (parent) {
+module.exports.remoraCore = function (parent) {
     var obj = {};
     obj.parent = parent;
     obj.meshServer = parent.parent;
@@ -32,7 +34,7 @@ module.exports[PLUGIN_SHORT_NAME] = function (parent) {
     obj.exports = ['serveraction'];
 
     obj.server_startup = function () {
-        console.log('[RemoraHQ-Core-Plugins] v' + PLUGIN_VERSION + ' loaded.');
+        console.log('[remoraCore] v' + PLUGIN_VERSION + ' loaded.');
     };
 
     /**

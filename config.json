@@ -1,7 +1,7 @@
 {
   "name": "RemoraHQ - Core",
-  "shortName": "RemoraHQ-Core-Plugins",
-  "version": "0.1.0",
+  "shortName": "remoraCore",
+  "version": "0.1.1",
   "description": "RemoraHQ infrastructure shell. Exposes a ping action used by the RemoraHQ UI to verify the plugin channel end-to-end. Subsequent RemoraHQ plugins (Alert State, Auditor, Reports, Terminal Bridge) extend this core.",
   "hasAdminPanel": false,
   "homepage": "https://github.com/lockbb1/RemoraHQ-Core-Plugins",
