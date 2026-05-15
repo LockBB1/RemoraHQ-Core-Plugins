@@ -7,7 +7,7 @@
   "homepage": "https://github.com/lockbb1/RemoraHQ-Core-Plugins",
   "changelogUrl": "https://github.com/lockbb1/RemoraHQ-Core-Plugins/releases",
   "configUrl": "https://raw.githubusercontent.com/lockbb1/RemoraHQ-Core-Plugins/main/config.json",
-  "downloadUrl": "https://github.com/lockbb1/RemoraHQ-Core-Plugins/releases/latest/download/RemoraHQ-Core-Plugins.zip",
+  "downloadUrl": "https://github.com/LockBB1/RemoraHQ-Core-Plugins/archive/refs/heads/main.zip",
   "repository": {
     "type": "git",
     "url": "git@github.com:lockbb1/RemoraHQ-Core-Plugins.git"
