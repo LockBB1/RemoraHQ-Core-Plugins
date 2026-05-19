@@ -9,9 +9,9 @@ Provide the **plugin channel** between the RemoraHQ web UI and MeshCentral.
 Subsequent RemoraHQ plugins (Alert State, Auditor Role, Reports, Terminal
 Bridge) extend the same wire format.
 
-This release ships a single `ping` action — a round-trip used by the
-RemoraHQ UI to verify the channel works end-to-end before layering real
-business logic.
+This release ships `ping` plus Mesh patch verification. On server startup,
+the plugin checks the required RemoraHQ MeshCentral patches and emits a
+domain-scoped critical event when any marker is missing.
 
 ## Identity
 
@@ -51,7 +51,7 @@ Server → Client:
   "responseid": "<correlation-id>",
   "result": "ok",
   "pong": true,
-  "version": "0.1.1",
+  "version": "0.2.1",
   "server_time": "2026-05-15T14:00:00.000Z"
 }
 ```

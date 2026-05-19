@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.2.0';
+var PLUGIN_VERSION = '0.2.1';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -100,6 +100,28 @@ function verifyMeshPatches() {
     return { ok: missing.length === 0, missing: missing, present: present };
 }
 
+function getDomainIds(meshServer) {
+    var domains = meshServer && meshServer.config && meshServer.config.domains;
+    if (!domains || typeof domains !== 'object') return [''];
+
+    var domainIds = Object.keys(domains);
+    if (domainIds.length === 0) return [''];
+    return domainIds;
+}
+
+function dispatchMissingPatchAlert(obj, report, missingNames) {
+    var domainIds = getDomainIds(obj.meshServer);
+    for (var i = 0; i < domainIds.length; i++) {
+        obj.meshServer.DispatchEvent(['*', 'server-users'], obj, {
+            etype: 'server',
+            action: 'remora-mesh-patch-missing',
+            msg: 'RemoraHQ Mesh patches missing: ' + missingNames + '. Re-apply patches from .meshcentral/modificate/patches/ and restart Mesh. See server log for fix hints.',
+            msgArgs: report.missing,
+            domain: domainIds[i]
+        });
+    }
+}
+
 module.exports.remoraCore = function (parent) {
     var obj = {};
     obj.parent = parent;
@@ -129,13 +151,7 @@ module.exports.remoraCore = function (parent) {
             return;
         }
         try {
-            obj.meshServer.DispatchEvent(['*', 'server-users'], obj, {
-                etype: 'server',
-                action: 'remora-mesh-patch-missing',
-                msg: 'RemoraHQ Mesh patches missing: ' + missingNames + '. Re-apply patches from .meshcentral/modificate/patches/ and restart Mesh. See server log for fix hints.',
-                msgArgs: report.missing,
-                time: new Date().toISOString()
-            });
+            dispatchMissingPatchAlert(obj, report, missingNames);
         } catch (e) {
             console.warn('[remoraCore] DispatchEvent failed: ' + (e && e.message));
         }
