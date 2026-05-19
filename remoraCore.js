@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.2.2';
+var PLUGIN_VERSION = '0.2.3';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -55,12 +55,6 @@ var REMORA_PATCHES = [
         module: 'meshcentral/db.js',
         marker: 'MODIFIED FOR REMORAHQ',
         hint: 'Copy .meshcentral/modificate/db.js over node_modules/meshcentral/db.js'
-    },
-    {
-        name: 'meshcentral-dispatchevent-peer-store',
-        module: 'meshcentral/meshcentral.js',
-        marker: '// [REMORAHQ-PATCH meshcentral-dispatchevent-peer-store v1.0.0 BEGIN]',
-        hint: 'Re-run .meshcentral/modificate/patches/meshcentral-dispatchevent-peer-store.ps1 on EVERY peer in the cluster'
     }
 ];
 
