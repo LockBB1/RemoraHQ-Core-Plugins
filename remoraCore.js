@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.4.3';
+var PLUGIN_VERSION = '0.4.4';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -250,7 +250,7 @@ module.exports.remoraCore = function (parent) {
                 var password = typeof command.password === 'string' ? command.password : '';
                 // Captured before we hand off to `authenticate` so the failure
                 // reply can echo *what we tried* without leaking the password.
-                var diag = { authMode: null, usernameLen: 0, usernameHasDot: false, usernameHasAt: false, domainId: null };
+                var diag = { authMode: null, usernameLen: 0, usernameHasDot: false, usernameHasAt: false, domainId: null, usernameSource: null };
                 function sendVerifyReply(valid, reason) {
                     session.send({
                         action: 'plugin',
@@ -283,13 +283,21 @@ module.exports.remoraCore = function (parent) {
                 } catch (e) { /* leave null */ }
                 if (!domain) { sendVerifyReply(false, 'no-domain'); return; }
                 try {
-                    var username = user.name || (user._id ? user._id.split('/').pop() : '');
+                    // v0.4.4 (RC-13.4.3): use the bare shortname from `user._id`
+                    // (`user/<domain>/<shortname>`). For LDAP-provisioned users
+                    // `user.name` is the LDAP display-name (e.g. "Roman Volkov"
+                    // — with a space, no dot) which `ldap.authenticate` cannot
+                    // bind with. The shortname stored in `_id` is what the
+                    // operator types on the login form, which is exactly what
+                    // Mesh's native re-auth path uses (webserver.js:2457).
+                    var username = (user._id ? user._id.split('/').pop() : '') || user.name || '';
                     var authMode = (domain.auth || 'default');
                     diag.authMode = authMode;
                     diag.domainId = String(domainId);
                     diag.usernameLen = username ? username.length : 0;
                     diag.usernameHasDot = username.indexOf('.') >= 0;
                     diag.usernameHasAt = username.indexOf('@') >= 0;
+                    diag.usernameSource = (user._id ? 'id-shortname' : 'user.name');
                     console.log('[remoraCore] verifyAccountPassword: user=' + user._id + ', auth=' + authMode + ', username=' + username);
                     webserver.authenticate(username, password, domain, function (err, returnedUserid) {
                         if (err) {
