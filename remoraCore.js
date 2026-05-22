@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.4.4';
+var PLUGIN_VERSION = '0.4.5';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -283,22 +283,38 @@ module.exports.remoraCore = function (parent) {
                 } catch (e) { /* leave null */ }
                 if (!domain) { sendVerifyReply(false, 'no-domain'); return; }
                 try {
-                    // v0.4.4 (RC-13.4.3): use the bare shortname from `user._id`
-                    // (`user/<domain>/<shortname>`). For LDAP-provisioned users
-                    // `user.name` is the LDAP display-name (e.g. "Roman Volkov"
-                    // — with a space, no dot) which `ldap.authenticate` cannot
-                    // bind with. The shortname stored in `_id` is what the
-                    // operator types on the login form, which is exactly what
-                    // Mesh's native re-auth path uses (webserver.js:2457).
-                    var username = (user._id ? user._id.split('/').pop() : '') || user.name || '';
+                    // v0.4.5 (RC-13.4.4): derive the LDAP bind handle from
+                    // `user.email`. Rationale: LDAP-only Mesh deployments
+                    // store user records keyed by opaque SID hex, so neither
+                    // `user._id`'s shortname nor `user.name` (= display name
+                    // from LDAP) is a valid bind handle. But the email
+                    // address is mirrored from AD where the local-part is
+                    // identical to sAMAccountName (corporate convention).
+                    // Fallbacks (in order):
+                    //   1) `user.email.split('@')[0]`   — primary path.
+                    //   2) `user._id.split('/').pop()`  — legacy local accounts.
+                    //   3) `user.name`                  — last-ditch.
+                    var username = '';
+                    var usernameSource = 'none';
+                    if (typeof user.email === 'string' && user.email.indexOf('@') > 0) {
+                        username = user.email.split('@')[0];
+                        usernameSource = 'email-localpart';
+                    } else if (user._id && user._id.indexOf('/') >= 0) {
+                        username = user._id.split('/').pop();
+                        usernameSource = 'id-shortname';
+                    } else if (typeof user.name === 'string' && user.name) {
+                        username = user.name;
+                        usernameSource = 'user.name';
+                    }
                     var authMode = (domain.auth || 'default');
                     diag.authMode = authMode;
                     diag.domainId = String(domainId);
-                    diag.usernameLen = username ? username.length : 0;
+                    diag.usernameLen = username.length;
                     diag.usernameHasDot = username.indexOf('.') >= 0;
                     diag.usernameHasAt = username.indexOf('@') >= 0;
-                    diag.usernameSource = (user._id ? 'id-shortname' : 'user.name');
-                    console.log('[remoraCore] verifyAccountPassword: user=' + user._id + ', auth=' + authMode + ', username=' + username);
+                    diag.usernameSource = usernameSource;
+                    if (!username) { sendVerifyReply(false, 'no-username-source'); return; }
+                    console.log('[remoraCore] verifyAccountPassword: sessionUser=' + user._id + ', auth=' + authMode + ', usernameSource=' + usernameSource + ', usernameLen=' + username.length);
                     webserver.authenticate(username, password, domain, function (err, returnedUserid) {
                         if (err) {
                             var errStr = (typeof err === 'string') ? err : (err && err.message) || 'auth-error';
