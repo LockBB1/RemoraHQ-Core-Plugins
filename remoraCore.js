@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.4.1';
+var PLUGIN_VERSION = '0.4.2';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -241,63 +241,69 @@ module.exports.remoraCore = function (parent) {
                 return;
             }
             case 'verifyAccountPassword': {
-                // v0.4.1 (RC-13.4.1): re-verify the current user's account
-                // password before sensitive 2FA actions. Uses Mesh's
-                // top-level `webserver.authenticate(name, pass, domain, fn)`
-                // — same path Mesh uses on login — so LDAP / SSPI / local
-                // are all handled. The earlier 0.4.0 path used
-                // `checkUserPassword` which only works for local hashes
-                // and always returned false on LDAP domains.
-                //
-                // serveraction(command, obj, parent) — `obj` is the Mesh
-                // user-session handler (.send + .session/.user), `parent`
-                // here is `webserver` (where `authenticate` lives).
+                // v0.4.2 (RC-13.4.2): adds `pluginVersion` to every reply +
+                // structured console logging so we can tell from one HAR
+                // (a) which build of the plugin is actually loaded and
+                // (b) why a re-auth attempt failed. Never logs the password.
                 var sessionObj = dbGet;
                 var webserver = ws;
                 var password = typeof command.password === 'string' ? command.password : '';
-                var failResponse = {
-                    action: 'plugin',
-                    plugin: PLUGIN_SHORT_NAME,
-                    pluginaction: 'verifyAccountPassword',
-                    tag: tag,
-                    responseid: responseid,
-                    result: 'ok',
-                    valid: false
-                };
-                if (!password || !webserver || typeof webserver.authenticate !== 'function') {
-                    session.send(failResponse);
-                    return;
+                function sendVerifyReply(valid, reason) {
+                    session.send({
+                        action: 'plugin',
+                        plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'verifyAccountPassword',
+                        tag: tag,
+                        responseid: responseid,
+                        result: 'ok',
+                        valid: valid === true,
+                        // Diagnostic-only fields (HAR + Mesh log). Safe to ship:
+                        // never includes the password and only mirrors public
+                        // identifiers the user already knows about themselves.
+                        pluginVersion: PLUGIN_VERSION,
+                        reason: reason
+                    });
                 }
+                if (!password) { sendVerifyReply(false, 'empty-password'); return; }
+                if (!webserver) { sendVerifyReply(false, 'no-webserver'); return; }
+                if (typeof webserver.authenticate !== 'function') { sendVerifyReply(false, 'no-authenticate-fn'); return; }
                 var user = sessionObj && sessionObj.user;
+                if (!user) { sendVerifyReply(false, 'no-session-user'); return; }
+                var domainId = user.domain;
                 var domain = null;
                 try {
-                    var domainId = user && user.domain;
                     domain = webserver.parent && webserver.parent.config && webserver.parent.config.domains
                         ? webserver.parent.config.domains[domainId]
                         : null;
-                } catch (e) { /* leave domain null → fail closed */ }
-                if (!user || !domain) {
-                    session.send(failResponse);
-                    return;
-                }
+                } catch (e) { /* leave null */ }
+                if (!domain) { sendVerifyReply(false, 'no-domain'); return; }
                 try {
-                    // `name` for authenticate() is the bare username Mesh uses
-                    // at login (not the full `user/<domain>/<name>` id).
                     var username = user.name || (user._id ? user._id.split('/').pop() : '');
-                    webserver.authenticate(username, password, domain, function (err, userid) {
-                        var ok = !err && typeof userid === 'string' && userid === user._id;
-                        session.send({
-                            action: 'plugin',
-                            plugin: PLUGIN_SHORT_NAME,
-                            pluginaction: 'verifyAccountPassword',
-                            tag: tag,
-                            responseid: responseid,
-                            result: 'ok',
-                            valid: ok === true
-                        });
+                    var authMode = (domain.auth || 'default');
+                    console.log('[remoraCore] verifyAccountPassword: user=' + user._id + ', auth=' + authMode + ', username=' + username);
+                    webserver.authenticate(username, password, domain, function (err, returnedUserid) {
+                        if (err) {
+                            var errStr = (typeof err === 'string') ? err : (err && err.message) || 'auth-error';
+                            console.log('[remoraCore] verifyAccountPassword FAIL: ' + errStr);
+                            sendVerifyReply(false, 'auth-error:' + errStr);
+                            return;
+                        }
+                        if (typeof returnedUserid !== 'string') {
+                            console.log('[remoraCore] verifyAccountPassword FAIL: no-userid (auth=' + authMode + ')');
+                            sendVerifyReply(false, 'no-returned-userid');
+                            return;
+                        }
+                        if (returnedUserid !== user._id) {
+                            console.log('[remoraCore] verifyAccountPassword FAIL: id-mismatch session=' + user._id + ' returned=' + returnedUserid);
+                            sendVerifyReply(false, 'id-mismatch');
+                            return;
+                        }
+                        console.log('[remoraCore] verifyAccountPassword OK');
+                        sendVerifyReply(true, 'ok');
                     });
                 } catch (e) {
-                    session.send(failResponse);
+                    console.log('[remoraCore] verifyAccountPassword EXCEPTION: ' + (e && e.message));
+                    sendVerifyReply(false, 'exception');
                 }
                 return;
             }
