@@ -1,6 +1,6 @@
 {
   "name": "remorahq-core-plugins",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "RemoraHQ Core MeshCentral plugin",
   "main": "remoraCore.js",
   "license": "Apache-2.0",

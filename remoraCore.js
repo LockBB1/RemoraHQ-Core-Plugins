@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.2.3';
+var PLUGIN_VERSION = '0.3.0';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -196,6 +196,28 @@ module.exports.remoraCore = function (parent) {
                     responseid: responseid,
                     result: 'ok',
                     report: report
+                });
+                return;
+            }
+            case 'getMeshVersion': {
+                // v0.3.0 (RC-13.2): expose `meshServer.currentVer` to the frontend
+                // so the RemoraHQ version-gate banner can decide supported / unsupported
+                // without requiring SITERIGHT_UPDATESRV (Mesh's native `serverversion`
+                // action is admin-gated). All callers are read-only — no side effects.
+                var meshVersion = null;
+                try {
+                    if (obj.meshServer && typeof obj.meshServer.currentVer === 'string') {
+                        meshVersion = obj.meshServer.currentVer;
+                    }
+                } catch (e) { /* ignore — return null */ }
+                session.send({
+                    action: 'plugin',
+                    plugin: PLUGIN_SHORT_NAME,
+                    pluginaction: 'getMeshVersion',
+                    tag: tag,
+                    responseid: responseid,
+                    result: 'ok',
+                    version: meshVersion
                 });
                 return;
             }
