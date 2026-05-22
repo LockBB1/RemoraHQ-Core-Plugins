@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.4.2';
+var PLUGIN_VERSION = '0.4.3';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -248,6 +248,9 @@ module.exports.remoraCore = function (parent) {
                 var sessionObj = dbGet;
                 var webserver = ws;
                 var password = typeof command.password === 'string' ? command.password : '';
+                // Captured before we hand off to `authenticate` so the failure
+                // reply can echo *what we tried* without leaking the password.
+                var diag = { authMode: null, usernameLen: 0, usernameHasDot: false, usernameHasAt: false, domainId: null };
                 function sendVerifyReply(valid, reason) {
                     session.send({
                         action: 'plugin',
@@ -259,9 +262,11 @@ module.exports.remoraCore = function (parent) {
                         valid: valid === true,
                         // Diagnostic-only fields (HAR + Mesh log). Safe to ship:
                         // never includes the password and only mirrors public
-                        // identifiers the user already knows about themselves.
+                        // identifiers / shape hints — no PII beyond what's
+                        // already visible in the user's own session.
                         pluginVersion: PLUGIN_VERSION,
-                        reason: reason
+                        reason: reason,
+                        diag: diag
                     });
                 }
                 if (!password) { sendVerifyReply(false, 'empty-password'); return; }
@@ -280,6 +285,11 @@ module.exports.remoraCore = function (parent) {
                 try {
                     var username = user.name || (user._id ? user._id.split('/').pop() : '');
                     var authMode = (domain.auth || 'default');
+                    diag.authMode = authMode;
+                    diag.domainId = String(domainId);
+                    diag.usernameLen = username ? username.length : 0;
+                    diag.usernameHasDot = username.indexOf('.') >= 0;
+                    diag.usernameHasAt = username.indexOf('@') >= 0;
                     console.log('[remoraCore] verifyAccountPassword: user=' + user._id + ', auth=' + authMode + ', username=' + username);
                     webserver.authenticate(username, password, domain, function (err, returnedUserid) {
                         if (err) {
