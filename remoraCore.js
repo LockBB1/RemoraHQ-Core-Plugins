@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.3.0';
+var PLUGIN_VERSION = '0.4.0';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -197,6 +197,101 @@ module.exports.remoraCore = function (parent) {
                     result: 'ok',
                     report: report
                 });
+                return;
+            }
+            case 'verifyOwnTotp': {
+                // v0.4.0 (RC-13.4): re-verify the signed-in user's currently
+                // enrolled TOTP code. Used as the second factor in the gate
+                // before disable / regenerate / clear backup codes.
+                // Reads the stored otpsecret from the user record and runs
+                // otplib.authenticator.check — same logic Mesh uses in the
+                // login flow (meshuser.js:3772).
+                var sessionObj = dbGet;
+                var token = typeof command.token === 'string' ? command.token : '';
+                var failTotp = {
+                    action: 'plugin',
+                    plugin: PLUGIN_SHORT_NAME,
+                    pluginaction: 'verifyOwnTotp',
+                    tag: tag,
+                    responseid: responseid,
+                    result: 'ok',
+                    valid: false
+                };
+                if (!/^\d{6}$/.test(token)) { session.send(failTotp); return; }
+                var u = sessionObj && sessionObj.user;
+                if (!u || typeof u.otpsecret !== 'string') { session.send(failTotp); return; }
+                var otplib = null;
+                try { otplib = require('otplib'); } catch (e) { otplib = null; }
+                if (otplib == null) { session.send(failTotp); return; }
+                try {
+                    otplib.authenticator.options = { window: 2 };
+                    var ok = otplib.authenticator.check(token, u.otpsecret) === true;
+                    session.send({
+                        action: 'plugin',
+                        plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'verifyOwnTotp',
+                        tag: tag,
+                        responseid: responseid,
+                        result: 'ok',
+                        valid: ok
+                    });
+                } catch (e) {
+                    session.send(failTotp);
+                }
+                return;
+            }
+            case 'verifyAccountPassword': {
+                // v0.4.0 (RC-13.4): re-verify the current user's account
+                // password before sensitive 2FA actions (enable / disable /
+                // regen backup codes). Mesh has no native re-auth action;
+                // we call webserver.checkUserPassword directly.
+                //
+                // serveraction(command, obj, parent) — `obj` is the Mesh
+                // user-session handler (.send + .session/.user), `parent`
+                // here is `webserver` (where `checkUserPassword` lives).
+                var sessionObj = dbGet;       // user-session handler
+                var webserver = ws;           // see meshuser.js:4864
+                var password = typeof command.password === 'string' ? command.password : '';
+                var failResponse = {
+                    action: 'plugin',
+                    plugin: PLUGIN_SHORT_NAME,
+                    pluginaction: 'verifyAccountPassword',
+                    tag: tag,
+                    responseid: responseid,
+                    result: 'ok',
+                    valid: false
+                };
+                if (!password || !webserver || typeof webserver.checkUserPassword !== 'function') {
+                    session.send(failResponse);
+                    return;
+                }
+                var user = sessionObj && sessionObj.user;
+                var domain = null;
+                try {
+                    var domainId = user && user.domain;
+                    domain = webserver.parent && webserver.parent.config && webserver.parent.config.domains
+                        ? webserver.parent.config.domains[domainId]
+                        : null;
+                } catch (e) { /* leave domain null → fail closed */ }
+                if (!user || !domain) {
+                    session.send(failResponse);
+                    return;
+                }
+                try {
+                    webserver.checkUserPassword(domain, user, password, function (result) {
+                        session.send({
+                            action: 'plugin',
+                            plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'verifyAccountPassword',
+                            tag: tag,
+                            responseid: responseid,
+                            result: 'ok',
+                            valid: result === true
+                        });
+                    });
+                } catch (e) {
+                    session.send(failResponse);
+                }
                 return;
             }
             case 'getMeshVersion': {
