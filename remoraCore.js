@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.4.0';
+var PLUGIN_VERSION = '0.4.1';
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -241,16 +241,19 @@ module.exports.remoraCore = function (parent) {
                 return;
             }
             case 'verifyAccountPassword': {
-                // v0.4.0 (RC-13.4): re-verify the current user's account
-                // password before sensitive 2FA actions (enable / disable /
-                // regen backup codes). Mesh has no native re-auth action;
-                // we call webserver.checkUserPassword directly.
+                // v0.4.1 (RC-13.4.1): re-verify the current user's account
+                // password before sensitive 2FA actions. Uses Mesh's
+                // top-level `webserver.authenticate(name, pass, domain, fn)`
+                // — same path Mesh uses on login — so LDAP / SSPI / local
+                // are all handled. The earlier 0.4.0 path used
+                // `checkUserPassword` which only works for local hashes
+                // and always returned false on LDAP domains.
                 //
                 // serveraction(command, obj, parent) — `obj` is the Mesh
                 // user-session handler (.send + .session/.user), `parent`
-                // here is `webserver` (where `checkUserPassword` lives).
-                var sessionObj = dbGet;       // user-session handler
-                var webserver = ws;           // see meshuser.js:4864
+                // here is `webserver` (where `authenticate` lives).
+                var sessionObj = dbGet;
+                var webserver = ws;
                 var password = typeof command.password === 'string' ? command.password : '';
                 var failResponse = {
                     action: 'plugin',
@@ -261,7 +264,7 @@ module.exports.remoraCore = function (parent) {
                     result: 'ok',
                     valid: false
                 };
-                if (!password || !webserver || typeof webserver.checkUserPassword !== 'function') {
+                if (!password || !webserver || typeof webserver.authenticate !== 'function') {
                     session.send(failResponse);
                     return;
                 }
@@ -278,7 +281,11 @@ module.exports.remoraCore = function (parent) {
                     return;
                 }
                 try {
-                    webserver.checkUserPassword(domain, user, password, function (result) {
+                    // `name` for authenticate() is the bare username Mesh uses
+                    // at login (not the full `user/<domain>/<name>` id).
+                    var username = user.name || (user._id ? user._id.split('/').pop() : '');
+                    webserver.authenticate(username, password, domain, function (err, userid) {
+                        var ok = !err && typeof userid === 'string' && userid === user._id;
                         session.send({
                             action: 'plugin',
                             plugin: PLUGIN_SHORT_NAME,
@@ -286,7 +293,7 @@ module.exports.remoraCore = function (parent) {
                             tag: tag,
                             responseid: responseid,
                             result: 'ok',
-                            valid: result === true
+                            valid: ok === true
                         });
                     });
                 } catch (e) {
