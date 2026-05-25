@@ -34,7 +34,20 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.4.5';
+var PLUGIN_VERSION = '0.5.0';
+
+// Cap on per-user notifications history. FIFO — oldest items are dropped on
+// append. Mesh DB stores the whole array under a single doc so we keep it
+// small enough to read/write cheaply on every change.
+var NOTIFICATIONS_CAP = 100;
+
+function notificationsDocId(userId) {
+    return 'remoraNotifications:' + String(userId);
+}
+
+function generateNotificationId() {
+    return String(Date.now()) + '-' + Math.random().toString(36).slice(2, 10);
+}
 
 /** Patches we expect to find present in the deployed Mesh install. */
 var REMORA_PATCHES = [
@@ -360,6 +373,133 @@ module.exports.remoraCore = function (parent) {
                     responseid: responseid,
                     result: 'ok',
                     version: meshVersion
+                });
+                return;
+            }
+            case 'notificationsList': {
+                // v0.5.0 (RC-13.7.3). Returns the persistent notifications
+                // history for the signed-in user. Storage: a single doc in
+                // the main Mesh DB collection keyed by `remoraNotifications:<userid>`.
+                // The same KV API is used by Mesh itself for every doc type,
+                // so no extra DB infrastructure is required.
+                var sessionObj = dbGet;
+                var u = sessionObj && sessionObj.user;
+                if (!u || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'notificationsList',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', items: []
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(notificationsDocId(u._id), function (err, docs) {
+                    var items = [];
+                    if (!err && docs && docs.length > 0 && Array.isArray(docs[0].items)) {
+                        items = docs[0].items;
+                    }
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'notificationsList',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', items: items
+                    });
+                });
+                return;
+            }
+            case 'notificationsAppend': {
+                // v0.5.0. Adds a new notification at the head of the list
+                // and trims to NOTIFICATIONS_CAP. Server stamps `ts` and
+                // generates `id` — client supplies `msgid`, `kind`, and
+                // optional `payload`. msgid is the Mesh i18n key (numeric);
+                // kind is a free-form category string ('security', 'login',
+                // 'system') the client uses for icon/severity routing.
+                var sessionObj = dbGet;
+                var u = sessionObj && sessionObj.user;
+                if (!u || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'notificationsAppend',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session-or-db'
+                    });
+                    return;
+                }
+                var item = {
+                    id: generateNotificationId(),
+                    msgid: (typeof command.msgid === 'number') ? command.msgid : 0,
+                    kind: (typeof command.kind === 'string' && command.kind) ? command.kind : 'security',
+                    ts: Date.now(),
+                    payload: (command.payload && typeof command.payload === 'object') ? command.payload : null,
+                    read: false
+                };
+                var docId = notificationsDocId(u._id);
+                obj.meshServer.db.Get(docId, function (err, docs) {
+                    var items = [];
+                    if (!err && docs && docs.length > 0 && Array.isArray(docs[0].items)) {
+                        items = docs[0].items;
+                    }
+                    items.unshift(item);
+                    if (items.length > NOTIFICATIONS_CAP) items = items.slice(0, NOTIFICATIONS_CAP);
+                    obj.meshServer.db.Set({
+                        _id: docId,
+                        type: 'remoraNotifications',
+                        userid: u._id,
+                        items: items
+                    }, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'notificationsAppend',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', item: item, total: items.length
+                        });
+                    });
+                });
+                return;
+            }
+            case 'notificationsMarkRead': {
+                // v0.5.0. Flips `read:true` on the given ids — or on every
+                // item when `ids === 'all'`. Idempotent. Returns the updated
+                // items so the caller can avoid a follow-up list call.
+                var sessionObj = dbGet;
+                var u = sessionObj && sessionObj.user;
+                if (!u || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'notificationsMarkRead',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session-or-db'
+                    });
+                    return;
+                }
+                var rawIds = command.ids;
+                var markAll = (rawIds === 'all' || rawIds === '*');
+                var idSet = {};
+                if (Array.isArray(rawIds)) {
+                    for (var k = 0; k < rawIds.length; k++) idSet[String(rawIds[k])] = true;
+                }
+                var docId2 = notificationsDocId(u._id);
+                obj.meshServer.db.Get(docId2, function (err, docs) {
+                    var items = [];
+                    if (!err && docs && docs.length > 0 && Array.isArray(docs[0].items)) {
+                        items = docs[0].items;
+                    }
+                    for (var j = 0; j < items.length; j++) {
+                        if (markAll || idSet[String(items[j].id)]) items[j].read = true;
+                    }
+                    obj.meshServer.db.Set({
+                        _id: docId2,
+                        type: 'remoraNotifications',
+                        userid: u._id,
+                        items: items
+                    }, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'notificationsMarkRead',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', items: items
+                        });
+                    });
                 });
                 return;
             }
