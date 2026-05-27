@@ -34,19 +34,73 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.5.0';
+var PLUGIN_VERSION = '0.6.0';
 
 // Cap on per-user notifications history. FIFO — oldest items are dropped on
 // append. Mesh DB stores the whole array under a single doc so we keep it
 // small enough to read/write cheaply on every change.
 var NOTIFICATIONS_CAP = 100;
 
+// RC-13.8.1 — msgid for "Signed in from new IP" notification, mirrors
+// `REMORA_NOTIFICATION_LOGIN_NEW_IP` on the frontend side.
+var NOTIFICATION_LOGIN_NEW_IP_MSGID = 9102;
+
+// Cap on per-user stored login-IP set. Old entries are dropped FIFO when a
+// fresh IP pushes the list over the limit, so a user who legitimately roams
+// between many networks doesn't bloat their record indefinitely.
+var LOGIN_IPS_CAP = 20;
+
 function notificationsDocId(userId) {
     return 'remoraNotifications:' + String(userId);
 }
 
+function loginIpsDocId(userId) {
+    return 'remoraLoginIps:' + String(userId);
+}
+
 function generateNotificationId() {
     return String(Date.now()) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Strip the `::ffff:` IPv4-in-IPv6 prefix that Node.js attaches to dual-stack
+ * sockets. Mirrors meshuser.js::cleanRemoteAddr so the IP we persist matches
+ * what Mesh displays elsewhere in the UI.
+ */
+function cleanRemoteAddr(addr) {
+    if (typeof addr !== 'string') return '';
+    if (addr.indexOf('::ffff:') === 0) return addr.substring(7);
+    return addr;
+}
+
+/**
+ * RC-13.8.1 — append a single notification straight to the DB doc.
+ * Mirrors the `notificationsAppend` pluginaction handler but skips the WS
+ * round-trip — useful from server-side hooks where there is no `session.send`.
+ */
+function appendNotificationDirect(obj, userId, msgid, kind, payload, cb) {
+    var docId = notificationsDocId(userId);
+    obj.meshServer.db.Get(docId, function (err, docs) {
+        var items = [];
+        if (!err && docs && docs.length > 0 && Array.isArray(docs[0].items)) {
+            items = docs[0].items;
+        }
+        items.unshift({
+            id: generateNotificationId(),
+            msgid: msgid,
+            kind: kind,
+            ts: Date.now(),
+            payload: payload || null,
+            read: false
+        });
+        if (items.length > NOTIFICATIONS_CAP) items = items.slice(0, NOTIFICATIONS_CAP);
+        obj.meshServer.db.Set({
+            _id: docId,
+            type: 'remoraNotifications',
+            userid: userId,
+            items: items
+        }, function () { if (typeof cb === 'function') cb(null); });
+    });
 }
 
 /** Patches we expect to find present in the deployed Mesh install. */
@@ -167,6 +221,65 @@ module.exports.remoraCore = function (parent) {
             dispatchMissingPatchAlert(obj, report, missingNames);
         } catch (e) {
             console.warn('[remoraCore] DispatchEvent failed: ' + (e && e.message));
+        }
+    };
+
+    /**
+     * RC-13.8.1 — fires on every successful WebSocket login (meshuser.js:688).
+     * We pull the user's source IP from the freshly-registered ws session,
+     * compare with the stored set in `remoraLoginIps:<userid>`, and append a
+     * notification if this IP is new. The very first login for a user
+     * (no doc yet) is treated as initial registration — silent.
+     */
+    obj.hook_userLoggedIn = function (user) {
+        try {
+            if (!user || typeof user._id !== 'string') return;
+            if (!obj.meshServer || !obj.meshServer.webserver || !obj.meshServer.db) return;
+            var sessions = obj.meshServer.webserver.wssessions
+                ? obj.meshServer.webserver.wssessions[user._id]
+                : null;
+            if (!Array.isArray(sessions) || sessions.length === 0) return;
+            // Last entry is the ws that just connected (meshuser.js:407 pushes
+            // before the callHook). `ws.clientIp` is stamped at line 399.
+            var freshWs = sessions[sessions.length - 1];
+            var ip = cleanRemoteAddr(freshWs && freshWs.clientIp);
+            if (!ip) return;
+
+            var docId = loginIpsDocId(user._id);
+            obj.meshServer.db.Get(docId, function (err, docs) {
+                var existing = (!err && docs && docs.length > 0 && Array.isArray(docs[0].ips))
+                    ? docs[0].ips : null;
+                var isFirstEver = existing === null;
+                var ips = existing || [];
+                var alreadyKnown = ips.indexOf(ip) >= 0;
+                if (alreadyKnown) {
+                    // Touch lastSeenAt only — no notification, no list mutation.
+                    obj.meshServer.db.Set({
+                        _id: docId, type: 'remoraLoginIps', userid: user._id,
+                        ips: ips, lastIp: ip, lastSeenAt: Date.now()
+                    }, function () {});
+                    return;
+                }
+                // Append IP. Trim FIFO if we exceed the cap.
+                ips.push(ip);
+                if (ips.length > LOGIN_IPS_CAP) ips = ips.slice(ips.length - LOGIN_IPS_CAP);
+                obj.meshServer.db.Set({
+                    _id: docId, type: 'remoraLoginIps', userid: user._id,
+                    ips: ips, lastIp: ip, lastSeenAt: Date.now()
+                }, function () {
+                    // First-ever login for this user — silent registration so
+                    // existing accounts don't get a "new IP" notification on
+                    // their very next login after plugin install.
+                    if (isFirstEver) return;
+                    appendNotificationDirect(
+                        obj, user._id,
+                        NOTIFICATION_LOGIN_NEW_IP_MSGID, 'login',
+                        { ip: ip }
+                    );
+                });
+            });
+        } catch (e) {
+            console.warn('[remoraCore] hook_userLoggedIn failed: ' + (e && e.message));
         }
     };
 
