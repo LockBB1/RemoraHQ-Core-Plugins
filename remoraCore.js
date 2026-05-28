@@ -34,7 +34,12 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.6.0';
+var PLUGIN_VERSION = '0.7.0';
+
+// RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
+// Mirrored here so we can report a meaningful retention value when the admin
+// has not set `dbexpire.events` in config.json.
+var DEFAULT_EVENTS_EXPIRE_DAYS = 20;
 
 // Cap on per-user notifications history. FIFO — oldest items are dropped on
 // append. Mesh DB stores the whole array under a single doc so we keep it
@@ -486,6 +491,49 @@ module.exports.remoraCore = function (parent) {
                     responseid: responseid,
                     result: 'ok',
                     version: meshVersion
+                });
+                return;
+            }
+            case 'auditRetentionInfo': {
+                // v0.7.0 (RC-13.17, P.8). Surfaces Mesh's `dbexpire.events`
+                // retention policy so the RemoraHQ /audit page can warn the
+                // admin when events older than N days are auto-purged.
+                // Read-only, site-admin only — non-admin silently gets a
+                // permission-denied reply so the banner can hide itself.
+                var sessionObj2 = dbGet;
+                var adminU = sessionObj2 && sessionObj2.user;
+                if (!adminU || adminU.siteadmin !== 0xFFFFFFFF) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'auditRetentionInfo',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var args = (obj.meshServer && obj.meshServer.args) || {};
+                var dbexpire = args.dbexpire || {};
+                var rawEvents = (typeof dbexpire.events === 'number') ? dbexpire.events : null;
+                var rawPower = (typeof dbexpire.powerevents === 'number') ? dbexpire.powerevents : null;
+                var eventsExpireDays = (rawEvents != null) ? (rawEvents / 86400) : DEFAULT_EVENTS_EXPIRE_DAYS;
+                var powerExpireDays = (rawPower != null) ? (rawPower / 86400) : 10;
+                var dbType = 'unknown';
+                try {
+                    if (obj.meshServer && obj.meshServer.db && typeof obj.meshServer.db.databaseType === 'number') {
+                        // 1=NeDB, 2=MongoDB, 3=MongoJS, 4=SQLite, 5=MariaDB, 6=PostgreSQL, 7=AceBase, 8=MySQL
+                        var typeMap = { 1: 'nedb', 2: 'mongo', 3: 'mongojs', 4: 'sqlite', 5: 'mariadb', 6: 'postgres', 7: 'acebase', 8: 'mysql' };
+                        dbType = typeMap[obj.meshServer.db.databaseType] || 'unknown';
+                    }
+                } catch (e) { /* ignore */ }
+                session.send({
+                    action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                    pluginaction: 'auditRetentionInfo',
+                    tag: tag, responseid: responseid,
+                    result: 'ok',
+                    eventsExpireDays: eventsExpireDays,
+                    powerExpireDays: powerExpireDays,
+                    configuredExplicitly: (rawEvents != null),
+                    dbType: dbType
                 });
                 return;
             }
