@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.11.1';
+var PLUGIN_VERSION = '0.11.2';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -1191,11 +1191,15 @@ module.exports.remoraCore = function (parent) {
                                 if (!isFinite(tms) || tms === 0) continue;
                                 var margs = Array.isArray(d.msgArgs) ? d.msgArgs : [];
                                 var primary = margs.length > 0 ? String(margs[0] == null ? '' : margs[0]) : '';
+                                // 5s time bucket is mandatory: for login/authfail
+                                // msgArgs[0] is the client IP (not unique), so two
+                                // genuine same-IP events must stay distinct while
+                                // the near-simultaneous peer replicas collapse.
+                                var bucket = Math.floor(tms / 5000);
                                 var fp;
                                 if (primary) {
-                                    fp = (d.action || '') + '|' + (d.msgid == null ? '' : d.msgid) + '|' + primary;
+                                    fp = (d.action || '') + '|' + (d.msgid == null ? '' : d.msgid) + '|' + primary + '|t' + bucket;
                                 } else {
-                                    var bucket = Math.floor(tms / 5000);
                                     fp = (d.action || '') + '|' + (d.msgid == null ? '' : d.msgid) + '|t' + bucket + '|' + (d.userid || '') + '|' + (d.nodeid || '');
                                 }
                                 if (seen[fp]) continue;
