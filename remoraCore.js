@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.10.0';
+var PLUGIN_VERSION = '0.11.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -1088,6 +1088,120 @@ module.exports.remoraCore = function (parent) {
                         });
                     });
                 });
+                return;
+            }
+            case 'healthSummary': {
+                // v0.11.0 (RC-14.25). Site-admin-only aggregate for the Health
+                // Dashboard. Server-computed metrics the frontend cannot derive
+                // on its own: live WS session count, event volume buckets, the
+                // failed-login count, and the cross-user client-error count.
+                // Everything else on the dashboard (agents online/total, pending
+                // plugin updates, unread notifications) the client already has.
+                var hsCtx = dbGet;
+                var hsAdmin = hsCtx && hsCtx.user;
+                if (!hsAdmin || hsAdmin.siteadmin !== 0xFFFFFFFF) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'healthSummary',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var now = Date.now();
+                var ms24h = 24 * 60 * 60 * 1000;
+                var ms7d = 7 * ms24h;
+                var ms30d = 30 * ms24h;
+
+                // Live WS sessions. wssessions maps userId -> array of sockets.
+                var activeSessions = 0;
+                var activeUsers = 0;
+                try {
+                    var wss = obj.meshServer && obj.meshServer.webserver
+                        ? obj.meshServer.webserver.wssessions : null;
+                    if (wss && typeof wss === 'object') {
+                        var keys = Object.keys(wss);
+                        activeUsers = keys.length;
+                        for (var k = 0; k < keys.length; k++) {
+                            var arr = wss[keys[k]];
+                            if (Array.isArray(arr)) activeSessions += arr.length;
+                        }
+                    }
+                } catch (e) { /* leave zeros */ }
+
+                var hsDomain = (hsAdmin.domain || '') + '';
+
+                // Step 2: count client errors in the last 24h across all users.
+                var finishHealth = function (events, failedLogins24h) {
+                    var clientErrors24h = 0;
+                    var sendHealth = function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'healthSummary',
+                            tag: tag, responseid: responseid,
+                            result: 'ok',
+                            activeSessions: activeSessions,
+                            activeUsers: activeUsers,
+                            events: events,
+                            failedLogins24h: failedLogins24h,
+                            clientErrors24h: clientErrors24h,
+                            serverTime: new Date().toISOString()
+                        });
+                    };
+                    try {
+                        obj.meshServer.db.GetAllType('remoraClientErrors', function (cerr, cdocs) {
+                            if (!cerr && Array.isArray(cdocs)) {
+                                for (var ci = 0; ci < cdocs.length; ci++) {
+                                    var citems = cdocs[ci] && cdocs[ci].items;
+                                    if (!Array.isArray(citems)) continue;
+                                    for (var cj = 0; cj < citems.length; cj++) {
+                                        var at = citems[cj] && citems[cj].at;
+                                        if (typeof at === 'number' && (now - at) <= ms24h) clientErrors24h++;
+                                    }
+                                }
+                            }
+                            sendHealth();
+                        });
+                    } catch (e) { sendHealth(); }
+                };
+
+                // Step 1: one event scan over the last 30 days, bucketed locally.
+                try {
+                    var db = obj.meshServer.db;
+                    var dbType = (db && typeof db.databaseType === 'number') ? db.databaseType : 0;
+                    var fromDate = new Date(now - ms30d);
+                    var query = { domain: hsDomain, time: { $gte: fromDate } };
+                    var onEvents = function (err, docs) {
+                        var events = { h24: 0, d7: 0, d30: 0 };
+                        var failed = 0;
+                        if (!err && Array.isArray(docs)) {
+                            for (var i = 0; i < docs.length; i++) {
+                                var d = docs[i] || {};
+                                var tms = d.time ? new Date(d.time).getTime() : 0;
+                                if (!isFinite(tms)) continue;
+                                var age = now - tms;
+                                if (age <= ms30d) events.d30++;
+                                if (age <= ms7d) events.d7++;
+                                if (age <= ms24h) {
+                                    events.h24++;
+                                    if (d.action === 'authfail') failed++;
+                                }
+                            }
+                        }
+                        finishHealth(events, failed);
+                    };
+                    if (dbType === 1 || dbType === 2) {
+                        db.eventsfile.find(query).exec(onEvents);
+                    } else if (dbType === 3) {
+                        db.eventsfile.find(query).toArray(onEvents);
+                    } else if (dbType === 4 || dbType === 5 || dbType === 6 || dbType === 8) {
+                        db.GetEventsTimeRange(['*'], hsDomain, null, fromDate, new Date(now), onEvents);
+                    } else {
+                        finishHealth({ h24: 0, d7: 0, d30: 0 }, 0);
+                    }
+                } catch (e) {
+                    finishHealth({ h24: 0, d7: 0, d30: 0 }, 0);
+                }
                 return;
             }
             default: {
