@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.9.1';
+var PLUGIN_VERSION = '0.10.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -52,6 +52,13 @@ var NOTIFICATIONS_CAP = 100;
 var CLIENT_ERRORS_CAP = 50;
 
 function clientErrorsDocId(userid) { return 'remoraClientErrors:' + userid; }
+
+// v0.10.0 (RC-14.26). Per-user saved-filter cap. Each entry is small
+// (name + scope + flat params record) so the cap is mostly to keep
+// the dropdown UI usable rather than to bound DB size.
+var SAVED_FILTERS_CAP = 30;
+
+function savedFiltersDocId(userid) { return 'remoraSavedFilters:' + userid; }
 
 // v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
 // quotes when the value contains a delimiter, quote or newline. Numbers
@@ -553,6 +560,219 @@ module.exports.remoraCore = function (parent) {
                     powerExpireDays: powerExpireDays,
                     configuredExplicitly: (rawEvents != null),
                     dbType: dbType
+                });
+                return;
+            }
+            case 'savedFiltersList': {
+                // v0.10.0 (RC-14.26). Per-user named filter snapshots for
+                // /audit and /agents. Keyed by user._id so any signed-in
+                // user gets their own list with no extra privilege check.
+                var sfListCtx = dbGet;
+                var sfListUser = sfListCtx && sfListCtx.user;
+                if (!sfListUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersList',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', items: []
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(savedFiltersDocId(sfListUser._id), function (err, docs) {
+                    var items = [];
+                    if (!err && docs && docs.length > 0 && Array.isArray(docs[0].items)) {
+                        items = docs[0].items;
+                    }
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersList',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', items: items
+                    });
+                });
+                return;
+            }
+            case 'savedFiltersSave': {
+                var sfSaveCtx = dbGet;
+                var sfSaveUser = sfSaveCtx && sfSaveCtx.user;
+                if (!sfSaveUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersSave',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session'
+                    });
+                    return;
+                }
+                var rawScope = String(command.scope || '');
+                var rawName = String(command.name || '').trim();
+                var rawParams = (command.params && typeof command.params === 'object') ? command.params : {};
+                if (rawScope !== 'audit' && rawScope !== 'agents') {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersSave',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-scope'
+                    });
+                    return;
+                }
+                if (rawName.length === 0 || rawName.length > 80) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersSave',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-name'
+                    });
+                    return;
+                }
+                var sfDocId = savedFiltersDocId(sfSaveUser._id);
+                obj.meshServer.db.Get(sfDocId, function (gerr, gdocs) {
+                    var items = [];
+                    if (!gerr && gdocs && gdocs.length > 0 && Array.isArray(gdocs[0].items)) {
+                        items = gdocs[0].items;
+                    }
+                    // Flatten params to string-only key/value pairs — saved
+                    // filters live in the URL / local-state world, no
+                    // structured payloads.
+                    var sanitized = {};
+                    var paramKeys = Object.keys(rawParams);
+                    for (var pk = 0; pk < paramKeys.length && pk < 40; pk++) {
+                        var k = paramKeys[pk];
+                        if (typeof k !== 'string' || k.length === 0 || k.length > 64) continue;
+                        var v = rawParams[k];
+                        if (v === null || v === undefined) continue;
+                        sanitized[k] = (typeof v === 'string') ? v.slice(0, 256) : String(v).slice(0, 256);
+                    }
+                    var item = {
+                        id: 'sf_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36),
+                        scope: rawScope,
+                        name: rawName.slice(0, 80),
+                        params: sanitized,
+                        createdAt: Date.now()
+                    };
+                    items.push(item);
+                    if (items.length > SAVED_FILTERS_CAP) items = items.slice(-SAVED_FILTERS_CAP);
+                    var sfDoc = (gdocs && gdocs.length > 0) ? gdocs[0] : { _id: sfDocId, type: 'remoraSavedFilters', userid: sfSaveUser._id };
+                    sfDoc.items = items;
+                    obj.meshServer.db.Set(sfDoc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'savedFiltersSave',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', item: item, total: items.length
+                        });
+                    });
+                });
+                return;
+            }
+            case 'savedFiltersDelete': {
+                var sfDelCtx = dbGet;
+                var sfDelUser = sfDelCtx && sfDelCtx.user;
+                if (!sfDelUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersDelete',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session'
+                    });
+                    return;
+                }
+                var delId = String(command.id || '');
+                if (!delId) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersDelete',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-id'
+                    });
+                    return;
+                }
+                var delDocId = savedFiltersDocId(sfDelUser._id);
+                obj.meshServer.db.Get(delDocId, function (gerr, gdocs) {
+                    if (gerr || !gdocs || gdocs.length === 0 || !Array.isArray(gdocs[0].items)) {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'savedFiltersDelete',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', items: [], total: 0
+                        });
+                        return;
+                    }
+                    var keep = [];
+                    for (var di = 0; di < gdocs[0].items.length; di++) {
+                        if (gdocs[0].items[di].id !== delId) keep.push(gdocs[0].items[di]);
+                    }
+                    gdocs[0].items = keep;
+                    obj.meshServer.db.Set(gdocs[0], function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'savedFiltersDelete',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', items: keep, total: keep.length
+                        });
+                    });
+                });
+                return;
+            }
+            case 'savedFiltersRename': {
+                var sfRenCtx = dbGet;
+                var sfRenUser = sfRenCtx && sfRenCtx.user;
+                if (!sfRenUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersRename',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session'
+                    });
+                    return;
+                }
+                var renId = String(command.id || '');
+                var renName = String(command.name || '').trim();
+                if (!renId || renName.length === 0 || renName.length > 80) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'savedFiltersRename',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
+                var renDocId = savedFiltersDocId(sfRenUser._id);
+                obj.meshServer.db.Get(renDocId, function (gerr, gdocs) {
+                    if (gerr || !gdocs || gdocs.length === 0 || !Array.isArray(gdocs[0].items)) {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'savedFiltersRename',
+                            tag: tag, responseid: responseid,
+                            result: 'error', error: 'not-found'
+                        });
+                        return;
+                    }
+                    var renItem = null;
+                    for (var ri = 0; ri < gdocs[0].items.length; ri++) {
+                        if (gdocs[0].items[ri].id === renId) {
+                            gdocs[0].items[ri].name = renName.slice(0, 80);
+                            renItem = gdocs[0].items[ri];
+                            break;
+                        }
+                    }
+                    if (!renItem) {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'savedFiltersRename',
+                            tag: tag, responseid: responseid,
+                            result: 'error', error: 'not-found'
+                        });
+                        return;
+                    }
+                    obj.meshServer.db.Set(gdocs[0], function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'savedFiltersRename',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', item: renItem
+                        });
+                    });
                 });
                 return;
             }
