@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.8.0';
+var PLUGIN_VERSION = '0.8.1';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
