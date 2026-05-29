@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.8.1';
+var PLUGIN_VERSION = '0.9.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -52,6 +52,18 @@ var NOTIFICATIONS_CAP = 100;
 var CLIENT_ERRORS_CAP = 50;
 
 function clientErrorsDocId(userid) { return 'remoraClientErrors:' + userid; }
+
+// v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
+// quotes when the value contains a delimiter, quote or newline. Numbers
+// and bools pass through as their string form, null/undefined → "".
+function csvCell(v) {
+    if (v === null || v === undefined) return '';
+    var s = (typeof v === 'string') ? v : String(v);
+    if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0 || s.indexOf('\r') >= 0) {
+        return '"' + s.replace(/"/g, '""') + '"';
+    }
+    return s;
+}
 
 // RC-13.8.1 — msgid for "Signed in from new IP" notification, mirrors
 // `REMORA_NOTIFICATION_LOGIN_NEW_IP` on the frontend side.
@@ -542,6 +554,113 @@ module.exports.remoraCore = function (parent) {
                     configuredExplicitly: (rawEvents != null),
                     dbType: dbType
                 });
+                return;
+            }
+            case 'auditExport': {
+                // v0.9.0 (RC-14.23). Site-admin-only audit export. Streams the
+                // Mesh native `events` collection in CSV or JSONL between
+                // `from` and `to` ISO timestamps. Single-shot reply by design
+                // — pre-beta volumes fit in memory; if real deployments hit
+                // the WS frame limit we'll split into chunk-stream in 14.23.1.
+                var auditAdminCtx = dbGet;
+                var auditAdmin = auditAdminCtx && auditAdminCtx.user;
+                if (!auditAdmin || auditAdmin.siteadmin !== 0xFFFFFFFF) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'auditExport',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var fromMs = Date.parse(String(command.from || ''));
+                var toMs = Date.parse(String(command.to || ''));
+                if (!isFinite(fromMs) || !isFinite(toMs) || toMs < fromMs) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'auditExport',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-range'
+                    });
+                    return;
+                }
+                var format = (command.format === 'csv') ? 'csv' : 'jsonl';
+                var domain = (auditAdmin.domain || '') + '';
+                var fromDate = new Date(fromMs);
+                var toDate = new Date(toMs);
+                try {
+                    obj.meshServer.db.GetEventsTimeRange(['*'], domain, null, fromDate, toDate, function (err, docs) {
+                        if (err || !Array.isArray(docs)) {
+                            session.send({
+                                action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                                pluginaction: 'auditExport',
+                                tag: tag, responseid: responseid,
+                                result: 'error', error: 'db-error'
+                            });
+                            return;
+                        }
+                        var text;
+                        if (format === 'csv') {
+                            var rows = ['time,action,userid,nodeid,msgid,ip,msg'];
+                            for (var i = 0; i < docs.length; i++) {
+                                var d = docs[i] || {};
+                                rows.push([
+                                    csvCell(d.time ? new Date(d.time).toISOString() : ''),
+                                    csvCell(d.action),
+                                    csvCell(d.userid),
+                                    csvCell(d.nodeid),
+                                    csvCell(d.msgid),
+                                    csvCell(d.ip),
+                                    csvCell(d.msg)
+                                ].join(','));
+                            }
+                            text = rows.join('\n') + '\n';
+                        } else {
+                            var lines = [];
+                            for (var j = 0; j < docs.length; j++) {
+                                try { lines.push(JSON.stringify(docs[j])); } catch (e) { /* skip cycles */ }
+                            }
+                            text = lines.join('\n') + '\n';
+                        }
+                        var fnameFrom = fromDate.toISOString().slice(0, 10);
+                        var fnameTo = toDate.toISOString().slice(0, 10);
+                        var filename = 'audit-' + fnameFrom + '_' + fnameTo + '.' + (format === 'csv' ? 'csv' : 'jsonl');
+                        // Audit the export itself so a compromised admin can't
+                        // silently exfiltrate the journal — the action lands
+                        // in the same Mesh events stream we just emitted.
+                        try {
+                            if (obj.meshServer && obj.meshServer.DispatchEvent) {
+                                obj.meshServer.DispatchEvent(['*'], obj, {
+                                    etype: 'system',
+                                    action: 'remora-audit-export',
+                                    userid: auditAdmin._id,
+                                    domain: domain,
+                                    msgid: 9201,
+                                    msgArgs: [filename, docs.length],
+                                    msg: 'Audit export: ' + filename + ' (' + docs.length + ' events)',
+                                    nolog: 0
+                                });
+                            }
+                        } catch (e) { /* never fail the export on audit-emit */ }
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'auditExport',
+                            tag: tag, responseid: responseid,
+                            result: 'ok',
+                            count: docs.length,
+                            format: format,
+                            filename: filename,
+                            text: text
+                        });
+                    });
+                } catch (e) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'auditExport',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'exception:' + (e && e.message ? e.message : String(e))
+                    });
+                }
                 return;
             }
             case 'reportClientError': {
