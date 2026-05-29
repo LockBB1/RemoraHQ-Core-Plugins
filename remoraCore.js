@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.7.0';
+var PLUGIN_VERSION = '0.8.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -45,6 +45,13 @@ var DEFAULT_EVENTS_EXPIRE_DAYS = 20;
 // append. Mesh DB stores the whole array under a single doc so we keep it
 // small enough to read/write cheaply on every change.
 var NOTIFICATIONS_CAP = 100;
+
+// v0.8.0 (RC-14.24). Cap on per-user client-error history. Frontend
+// ErrorBoundary fires reportClientError on operator request; we FIFO-cap
+// to keep the DB doc small while still preserving recent triage info.
+var CLIENT_ERRORS_CAP = 50;
+
+function clientErrorsDocId(userid) { return 'remoraClientErrors:' + userid; }
 
 // RC-13.8.1 — msgid for "Signed in from new IP" notification, mirrors
 // `REMORA_NOTIFICATION_LOGIN_NEW_IP` on the frontend side.
@@ -534,6 +541,55 @@ module.exports.remoraCore = function (parent) {
                     powerExpireDays: powerExpireDays,
                     configuredExplicitly: (rawEvents != null),
                     dbType: dbType
+                });
+                return;
+            }
+            case 'reportClientError': {
+                // v0.8.0 (RC-14.24). Frontend ErrorBoundary posts a captured
+                // render-time error here. Any signed-in user may call so the
+                // server keeps a per-user FIFO list under
+                // `remoraClientErrors:<userid>`, capped at CLIENT_ERRORS_CAP.
+                // No PII is stripped at this layer — operators submit their
+                // own errors and the doc is keyed by their own userid.
+                var sessionUser = dbGet;
+                var reportingUser = sessionUser && sessionUser.user;
+                if (!reportingUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'reportClientError',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', stored: false
+                    });
+                    return;
+                }
+                var docId = clientErrorsDocId(reportingUser._id);
+                obj.meshServer.db.Get(docId, function (gerr, gdocs) {
+                    var items = [];
+                    if (!gerr && gdocs && gdocs.length > 0 && Array.isArray(gdocs[0].items)) {
+                        items = gdocs[0].items;
+                    }
+                    items.push({
+                        at: Date.now(),
+                        userid: reportingUser._id,
+                        message: typeof command.message === 'string' ? command.message.slice(0, 4000) : '',
+                        stack: typeof command.stack === 'string' ? command.stack.slice(0, 8000) : '',
+                        componentStack: typeof command.componentStack === 'string' ? command.componentStack.slice(0, 8000) : '',
+                        version: typeof command.version === 'string' ? command.version.slice(0, 64) : '',
+                        buildNumber: typeof command.buildNumber === 'number' ? command.buildNumber : 0,
+                        userAgent: typeof command.userAgent === 'string' ? command.userAgent.slice(0, 512) : '',
+                        href: typeof command.href === 'string' ? command.href.slice(0, 512) : ''
+                    });
+                    if (items.length > CLIENT_ERRORS_CAP) items = items.slice(-CLIENT_ERRORS_CAP);
+                    var doc = (gdocs && gdocs.length > 0) ? gdocs[0] : { _id: docId, type: 'remoraClientErrors', userid: reportingUser._id };
+                    doc.items = items;
+                    obj.meshServer.db.Set(doc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'reportClientError',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', stored: true
+                        });
+                    });
                 });
                 return;
             }
