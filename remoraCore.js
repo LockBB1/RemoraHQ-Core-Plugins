@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.11.0';
+var PLUGIN_VERSION = '0.11.1';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -1175,10 +1175,31 @@ module.exports.remoraCore = function (parent) {
                         var events = { h24: 0, d7: 0, d30: 0 };
                         var failed = 0;
                         if (!err && Array.isArray(docs)) {
+                            // Peer-replication dedup. In a multi-server peered
+                            // cluster (mongoDbChangeStream) every peer re-stores
+                            // each forwarded event, so an N-peer cluster writes
+                            // N rows per real event. We collapse them with the
+                            // SAME fingerprint the frontend Audit page uses
+                            // (lib/transport/mappers/event.ts::dedupMeshEvents):
+                            // (action, msgid, msgArgs[0]) with a 5s-bucket +
+                            // userid + nodeid fallback when msgArgs is empty —
+                            // so the dashboard counts match the Audit list.
+                            var seen = Object.create(null);
                             for (var i = 0; i < docs.length; i++) {
                                 var d = docs[i] || {};
                                 var tms = d.time ? new Date(d.time).getTime() : 0;
-                                if (!isFinite(tms)) continue;
+                                if (!isFinite(tms) || tms === 0) continue;
+                                var margs = Array.isArray(d.msgArgs) ? d.msgArgs : [];
+                                var primary = margs.length > 0 ? String(margs[0] == null ? '' : margs[0]) : '';
+                                var fp;
+                                if (primary) {
+                                    fp = (d.action || '') + '|' + (d.msgid == null ? '' : d.msgid) + '|' + primary;
+                                } else {
+                                    var bucket = Math.floor(tms / 5000);
+                                    fp = (d.action || '') + '|' + (d.msgid == null ? '' : d.msgid) + '|t' + bucket + '|' + (d.userid || '') + '|' + (d.nodeid || '');
+                                }
+                                if (seen[fp]) continue;
+                                seen[fp] = true;
                                 var age = now - tms;
                                 if (age <= ms30d) events.d30++;
                                 if (age <= ms7d) events.d7++;

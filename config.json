@@ -1,7 +1,7 @@
 {
   "name": "RemoraHQ - Core",
   "shortName": "remoraCore",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "RemoraHQ infrastructure shell. Exposes a ping action used by the RemoraHQ UI to verify the plugin channel end-to-end. On server start, verifies the three RemoraHQ Mesh patches (.meshcentral/modificate/patches/) and dispatches a domain-scoped critical Alert if any are missing — protects against silent breakage after a Mesh upgrade. Subsequent RemoraHQ plugins (Alert State, Auditor, Reports, Terminal Bridge) extend this core.",
   "hasAdminPanel": false,
   "homepage": "https://github.com/lockbb1/RemoraHQ-Core-Plugins",
