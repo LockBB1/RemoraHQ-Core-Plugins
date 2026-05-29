@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.9.0';
+var PLUGIN_VERSION = '0.9.1';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -589,13 +589,22 @@ module.exports.remoraCore = function (parent) {
                 var fromDate = new Date(fromMs);
                 var toDate = new Date(toMs);
                 try {
-                    obj.meshServer.db.GetEventsTimeRange(['*'], domain, null, fromDate, toDate, function (err, docs) {
+                    // v0.9.1 — upstream `GetEventsTimeRange` requires a non-null
+                    // msgid filter array (`msgid: { $in: msgids }`), which makes
+                    // the "all events" use case impossible on NeDB / MongoDB /
+                    // MongoJS backends. SQL backends special-case `ids === '*'`
+                    // and ignore msgids, but those are the minority. Go direct
+                    // to `eventsfile` and run the time-range query ourselves.
+                    var db = obj.meshServer.db;
+                    var dbType = (db && typeof db.databaseType === 'number') ? db.databaseType : 0;
+                    var query = { domain: domain, time: { $gte: fromDate, $lte: toDate } };
+                    var onDocs = function (err, docs) {
                         if (err || !Array.isArray(docs)) {
                             session.send({
                                 action: 'plugin', plugin: PLUGIN_SHORT_NAME,
                                 pluginaction: 'auditExport',
                                 tag: tag, responseid: responseid,
-                                result: 'error', error: 'db-error'
+                                result: 'error', error: 'db-error:' + (err && err.message ? err.message : 'no-docs')
                             });
                             return;
                         }
@@ -652,7 +661,29 @@ module.exports.remoraCore = function (parent) {
                             filename: filename,
                             text: text
                         });
-                    });
+                    };
+                    // Backend-specific query path. NeDB (1) + MongoJS (2) +
+                    // MongoDB (3) all share a `find(query).sort().exec/toArray`
+                    // shape but differ in cursor terminator. SQL backends
+                    // (4-6, 8) fall back to GetEventsTimeRange's SQL path —
+                    // that one IS special-cased on `ids = ['*']` upstream.
+                    if (dbType === 1 || dbType === 2) {
+                        // NeDB / MongoJS
+                        db.eventsfile.find(query).sort({ time: 1 }).exec(onDocs);
+                    } else if (dbType === 3) {
+                        // MongoDB native driver
+                        db.eventsfile.find(query).sort({ time: 1 }).toArray(onDocs);
+                    } else if (dbType === 4 || dbType === 5 || dbType === 6 || dbType === 8) {
+                        // SQL backends: native helper works (ids='*' shortcut).
+                        db.GetEventsTimeRange(['*'], domain, null, fromDate, toDate, onDocs);
+                    } else {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'auditExport',
+                            tag: tag, responseid: responseid,
+                            result: 'error', error: 'unsupported-db-type:' + dbType
+                        });
+                    }
                 } catch (e) {
                     session.send({
                         action: 'plugin', plugin: PLUGIN_SHORT_NAME,
