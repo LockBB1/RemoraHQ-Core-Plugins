@@ -20,7 +20,7 @@
  * so action/pluginaction echo is informational. We still echo both to keep traces
  * readable in DevTools.
  *
- * Server startup also runs a Mesh-patch verifier: if any of the four RemoraHQ
+ * Server startup also runs a Mesh-patch verifier: if any of the three RemoraHQ
  * patches in .meshcentral/modificate/patches/ has been undone (typically by a
  * Mesh upgrade), the plugin dispatches a Critical event that surfaces in the
  * RemoraHQ Alerts feed (event.ts mapper registers `remora-mesh-patch-missing`
@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.4';
+var PLUGIN_VERSION = '0.12.5';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -172,14 +172,14 @@ function appendNotificationDirect(obj, userId, msgid, kind, payload, cb) {
     });
 }
 
-/** Patches we expect to find present in the deployed Mesh install. */
+/**
+ * Patches we expect to find present in the deployed Mesh install.
+ * RETIRED 2026-06-02 (RC-15): webserver-spa-remorahq dropped — RemoraHQ now runs
+ * behind nginx serving the SPA static from disk (try_files), so the Mesh SPA mount
+ * is shadowed and no longer a dependency. Patch file kept for rollback. See
+ * .documentation/RemoraHQ 2/INFRA/NGINX-SETUP.md.
+ */
 var REMORA_PATCHES = [
-    {
-        name: 'webserver-spa-remorahq',
-        module: 'meshcentral/webserver.js',
-        marker: '// [REMORAHQ-PATCH webserver-spa-remorahq v1.0.0 BEGIN]',
-        hint: 'Re-run .meshcentral/modificate/patches/webserver-spa-remorahq.ps1'
-    },
     {
         name: 'pluginhandler-getpluginpermissions-guard',
         module: 'meshcentral/pluginHandler.js',
