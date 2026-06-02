@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.0';
+var PLUGIN_VERSION = '0.12.1';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -1321,7 +1321,12 @@ module.exports.remoraCore = function (parent) {
                     });
                     return;
                 }
-                var targetUserid = String(command.userid || '');
+                // NOTE: the wire field is `targetUser`, NOT `userid` — Mesh's
+                // command router overwrites `command.userid` with the REQUESTING
+                // user's _id before serveraction runs, so a `userid` payload
+                // would always resolve to the caller (super-admin), never the
+                // target. (HAR-confirmed, RC-14.29.2.)
+                var targetUserid = String(command.targetUser || '');
                 var targetFlag = String(command.flag || '');
                 var targetValue = command.value === true;
                 if (!targetUserid || REMORA_PERMISSION_FLAGS.indexOf(targetFlag) < 0) {
