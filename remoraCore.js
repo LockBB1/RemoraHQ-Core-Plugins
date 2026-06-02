@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.1';
+var PLUGIN_VERSION = '0.12.2';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -203,10 +203,13 @@ function verifyMeshPatches() {
             if (content.indexOf(patch.marker) !== -1) {
                 present.push(patch.name);
             } else {
-                missing.push({ name: patch.name, hint: patch.hint, reason: 'marker-missing', path: modulePath });
+                missing.push({ name: patch.name, hint: patch.hint, reason: 'marker-missing' });
             }
         } catch (e) {
-            missing.push({ name: patch.name, hint: patch.hint, reason: 'read-error: ' + (e && e.message), path: modulePath });
+            // v0.12.2 (RC-14.7): never expose the resolved filesystem path in the
+            // response/alert — it leaks server FS structure to any viewer. Report
+            // only the error code (ENOENT/EACCES/...), no path, no raw message.
+            missing.push({ name: patch.name, hint: patch.hint, reason: 'read-error: ' + (e && e.code ? e.code : 'unknown') });
         }
     }
     return { ok: missing.length === 0, missing: missing, present: present };
