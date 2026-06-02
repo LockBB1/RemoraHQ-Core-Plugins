@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.2';
+var PLUGIN_VERSION = '0.12.3';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -94,6 +94,30 @@ var NOTIFICATION_LOGIN_NEW_IP_MSGID = 9102;
 // fresh IP pushes the list over the limit, so a user who legitimately roams
 // between many networks doesn't bloat their record indefinitely.
 var LOGIN_IPS_CAP = 20;
+
+// v0.12.3 (RC-14.8). Rate-limit for verifyAccountPassword. Without it an
+// authenticated session can spam re-auth attempts → LDAP saturation + a
+// timing oracle on the user's own password (pentest MED-1, CVSS 4.2). Keyed
+// by user._id (the action only ever verifies the session user's OWN password,
+// so per-user is the right granularity). In-memory only; resets on restart.
+var VERIFY_PW_MAX = 5;
+var VERIFY_PW_WINDOW_MS = 60000;
+var verifyPwAttempts = {}; // userid -> { count, resetAt }
+
+// Returns { allowed, retryAfterSec }. Counts the attempt when allowed.
+function checkVerifyPwRateLimit(userid) {
+    var now = Date.now();
+    var e = verifyPwAttempts[userid];
+    if (!e || now >= e.resetAt) {
+        verifyPwAttempts[userid] = { count: 1, resetAt: now + VERIFY_PW_WINDOW_MS };
+        return { allowed: true, retryAfterSec: 0 };
+    }
+    if (e.count >= VERIFY_PW_MAX) {
+        return { allowed: false, retryAfterSec: Math.ceil((e.resetAt - now) / 1000) };
+    }
+    e.count++;
+    return { allowed: true, retryAfterSec: 0 };
+}
 
 function notificationsDocId(userId) {
     return 'remoraNotifications:' + String(userId);
@@ -424,9 +448,14 @@ module.exports.remoraCore = function (parent) {
                 var password = typeof command.password === 'string' ? command.password : '';
                 // Captured before we hand off to `authenticate` so the failure
                 // reply can echo *what we tried* without leaking the password.
-                var diag = { authMode: null, usernameLen: 0, usernameHasDot: false, usernameHasAt: false, domainId: null, usernameSource: null };
-                function sendVerifyReply(valid, reason) {
-                    session.send({
+                // v0.12.3 (RC-14.8): dropped authMode/domainId from the reply —
+                // they exposed the domain's auth backend + id to the client.
+                // Kept server-side only (console.log below). The remaining
+                // fields are username shape-hints, no PII beyond the caller's
+                // own session.
+                var diag = { usernameLen: 0, usernameHasDot: false, usernameHasAt: false, usernameSource: null };
+                function sendVerifyReply(valid, reason, extra) {
+                    var reply = {
                         action: 'plugin',
                         plugin: PLUGIN_SHORT_NAME,
                         pluginaction: 'verifyAccountPassword',
@@ -434,20 +463,28 @@ module.exports.remoraCore = function (parent) {
                         responseid: responseid,
                         result: 'ok',
                         valid: valid === true,
-                        // Diagnostic-only fields (HAR + Mesh log). Safe to ship:
-                        // never includes the password and only mirrors public
-                        // identifiers / shape hints — no PII beyond what's
-                        // already visible in the user's own session.
                         pluginVersion: PLUGIN_VERSION,
                         reason: reason,
                         diag: diag
-                    });
+                    };
+                    if (extra && typeof extra === 'object') {
+                        for (var k in extra) { if (extra.hasOwnProperty(k)) reply[k] = extra[k]; }
+                    }
+                    session.send(reply);
                 }
                 if (!password) { sendVerifyReply(false, 'empty-password'); return; }
                 if (!webserver) { sendVerifyReply(false, 'no-webserver'); return; }
                 if (typeof webserver.authenticate !== 'function') { sendVerifyReply(false, 'no-authenticate-fn'); return; }
                 var user = sessionObj && sessionObj.user;
                 if (!user) { sendVerifyReply(false, 'no-session-user'); return; }
+                // RC-14.8 rate-limit: 5 attempts / 60s per user. Checked before
+                // the (expensive) LDAP bind to blunt brute-force + LDAP saturation.
+                var rl = checkVerifyPwRateLimit(user._id);
+                if (!rl.allowed) {
+                    console.log('[remoraCore] verifyAccountPassword RATE-LIMITED: ' + user._id + ' retryAfter=' + rl.retryAfterSec + 's');
+                    sendVerifyReply(false, 'rate-limited', { retryAfterSec: rl.retryAfterSec });
+                    return;
+                }
                 var domainId = user.domain;
                 var domain = null;
                 try {
@@ -480,9 +517,7 @@ module.exports.remoraCore = function (parent) {
                         username = user.name;
                         usernameSource = 'user.name';
                     }
-                    var authMode = (domain.auth || 'default');
-                    diag.authMode = authMode;
-                    diag.domainId = String(domainId);
+                    var authMode = (domain.auth || 'default'); // server-side log only
                     diag.usernameLen = username.length;
                     diag.usernameHasDot = username.indexOf('.') >= 0;
                     diag.usernameHasAt = username.indexOf('@') >= 0;
