@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.11.2';
+var PLUGIN_VERSION = '0.12.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -59,6 +59,20 @@ function clientErrorsDocId(userid) { return 'remoraClientErrors:' + userid; }
 var SAVED_FILTERS_CAP = 30;
 
 function savedFiltersDocId(userid) { return 'remoraSavedFilters:' + userid; }
+
+// v0.12.0 (RC-14.29). RemoraHQ permission model — a thin RBAC layer ON TOP of
+// Mesh siteadmin/per-mesh rights for RemoraHQ-specific capabilities Mesh has no
+// notion of. A super-admin (siteadmin === full) grants individual flags to
+// individual users. Stored in ONE site-wide doc (not per-user): grants is a map
+// `{ <userid>: { <flag>: true } }`. Super-admins implicitly hold every flag and
+// are never stored. The whitelist below is the authoritative flag set — the
+// frontend mirror lives in src/lib/contracts/remoraPermissions.ts. First
+// consumer: canUseSystemTerminal gates the SYSTEM terminal option (was an
+// interim role check in TerminalToolbar). NOTE: this is UI-authority only for
+// now; true server-enforce of the SYSTEM shell (meshcore) is slot 14.14.
+var REMORA_PERMISSIONS_DOC_ID = 'remoraPermissions';
+var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal'];
+function isSuperAdminUser(u) { return !!u && u.siteadmin === 0xFFFFFFFF; }
 
 // v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
 // quotes when the value contains a delimiter, quote or newline. Numbers
@@ -1227,6 +1241,117 @@ module.exports.remoraCore = function (parent) {
                 } catch (e) {
                     finishHealth({ h24: 0, d7: 0, d30: 0 }, 0);
                 }
+                return;
+            }
+            case 'permissionsSelf': {
+                // v0.12.0 (RC-14.29). Any signed-in user fetches their OWN
+                // effective RemoraHQ flags — the UI gates on these (default
+                // deny while loading). Super-admins get every flag true without
+                // a DB read.
+                var psUser = dbGet && dbGet.user;
+                if (!psUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSelf',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session'
+                    });
+                    return;
+                }
+                var sendSelf = function (flags) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSelf',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', flags: flags
+                    });
+                };
+                if (isSuperAdminUser(psUser)) {
+                    var allFlags = {};
+                    for (var sfI = 0; sfI < REMORA_PERMISSION_FLAGS.length; sfI++) allFlags[REMORA_PERMISSION_FLAGS[sfI]] = true;
+                    sendSelf(allFlags);
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (err, docs) {
+                    var grants = (!err && docs && docs.length > 0 && docs[0].grants && typeof docs[0].grants === 'object') ? docs[0].grants : {};
+                    var mine = grants[psUser._id] || {};
+                    var flags = {};
+                    for (var fi = 0; fi < REMORA_PERMISSION_FLAGS.length; fi++) {
+                        var fname = REMORA_PERMISSION_FLAGS[fi];
+                        flags[fname] = mine[fname] === true;
+                    }
+                    sendSelf(flags);
+                });
+                return;
+            }
+            case 'permissionsList': {
+                // v0.12.0 (RC-14.29). Super-admin-only: the full grants map for
+                // the management UI. Frontend joins it with the Mesh user list.
+                var plUser = dbGet && dbGet.user;
+                if (!isSuperAdminUser(plUser) || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsList',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (err, docs) {
+                    var grants = (!err && docs && docs.length > 0 && docs[0].grants && typeof docs[0].grants === 'object') ? docs[0].grants : {};
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsList',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: grants
+                    });
+                });
+                return;
+            }
+            case 'permissionsSetFlag': {
+                // v0.12.0 (RC-14.29). Super-admin-only: grant/revoke one
+                // whitelisted flag for one user. Returns the updated full map.
+                var psfUser = dbGet && dbGet.user;
+                if (!isSuperAdminUser(psfUser) || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSetFlag',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var targetUserid = String(command.userid || '');
+                var targetFlag = String(command.flag || '');
+                var targetValue = command.value === true;
+                if (!targetUserid || REMORA_PERMISSION_FLAGS.indexOf(targetFlag) < 0) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSetFlag',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (gerr, gdocs) {
+                    var doc = (!gerr && gdocs && gdocs.length > 0) ? gdocs[0] : { _id: REMORA_PERMISSIONS_DOC_ID, type: 'remoraPermissions' };
+                    if (!doc.grants || typeof doc.grants !== 'object') doc.grants = {};
+                    if (targetValue) {
+                        if (!doc.grants[targetUserid] || typeof doc.grants[targetUserid] !== 'object') doc.grants[targetUserid] = {};
+                        doc.grants[targetUserid][targetFlag] = true;
+                    } else if (doc.grants[targetUserid]) {
+                        delete doc.grants[targetUserid][targetFlag];
+                        if (Object.keys(doc.grants[targetUserid]).length === 0) delete doc.grants[targetUserid];
+                    }
+                    obj.meshServer.db.Set(doc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'permissionsSetFlag',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: doc.grants
+                        });
+                    });
+                });
                 return;
             }
             default: {
