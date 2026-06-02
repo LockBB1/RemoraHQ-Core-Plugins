@@ -20,7 +20,7 @@
  * so action/pluginaction echo is informational. We still echo both to keep traces
  * readable in DevTools.
  *
- * Server startup also runs a Mesh-patch verifier: if any of the three RemoraHQ
+ * Server startup also runs a Mesh-patch verifier: if any of the four RemoraHQ
  * patches in .meshcentral/modificate/patches/ has been undone (typically by a
  * Mesh upgrade), the plugin dispatches a Critical event that surfaces in the
  * RemoraHQ Alerts feed (event.ts mapper registers `remora-mesh-patch-missing`
@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.3';
+var PLUGIN_VERSION = '0.12.4';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -191,6 +191,12 @@ var REMORA_PATCHES = [
         module: 'meshcentral/db.js',
         marker: 'MODIFIED FOR REMORAHQ',
         hint: 'Copy .meshcentral/modificate/db.js over node_modules/meshcentral/db.js'
+    },
+    {
+        name: 'meshuser-addplugin-allowlist',
+        module: 'meshcentral/meshuser.js',
+        marker: '// [REMORAHQ-PATCH meshuser-addplugin-allowlist v1.0.0 BEGIN]',
+        hint: 'Re-run .meshcentral/modificate/patches/meshuser-addplugin-allowlist.ps1'
     }
 ];
 
