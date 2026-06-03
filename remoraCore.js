@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.5';
+var PLUGIN_VERSION = '0.12.6';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -70,8 +70,13 @@ function savedFiltersDocId(userid) { return 'remoraSavedFilters:' + userid; }
 // consumer: canUseSystemTerminal gates the SYSTEM terminal option (was an
 // interim role check in TerminalToolbar). NOTE: this is UI-authority only for
 // now; true server-enforce of the SYSTEM shell (meshcore) is slot 14.14.
+//   v0.12.6 (RC-15.13) — second flag canRemoteInstall gates the Remote Install
+//   (WAC-style push) feature. Server-enforced in remoraTerminalBridge.serveraction
+//   (the privileged plugin that runs the WinRM push), mirroring the
+//   canUseSystemTerminal enforce point. Registering it here makes it appear in
+//   permissionsSelf / permissionsList / the Access Policy UI automatically.
 var REMORA_PERMISSIONS_DOC_ID = 'remoraPermissions';
-var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal'];
+var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal', 'canRemoteInstall'];
 function isSuperAdminUser(u) { return !!u && u.siteadmin === 0xFFFFFFFF; }
 
 // v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
