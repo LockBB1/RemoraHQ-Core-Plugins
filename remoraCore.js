@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.13.0';
+var PLUGIN_VERSION = '0.14.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -91,6 +91,17 @@ var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal', 'canRemoteInstall'];
 // every flag implicitly and is locked-on in the UI. Mirrors REMORA_ROLES in
 // src/lib/contracts/role.ts (minus super_admin).
 var REMORA_ROLE_KEYS = ['administrator', 'operator', 'viewer', 'auditor'];
+
+// v0.14.0 (RC-15.M.6) — Machine Group OWNER. A super-admin assigns one owner
+// usergroup per device group; the OWNER usergroup is the one allowed to add
+// members to that group. Stored in a single site-wide doc, NOT on the Mesh
+// object (RemoraHQ-specific, Mesh has no notion of it). UI-authority in M.6;
+// a server-enforce patch on addmeshuser is a later slot.
+var REMORA_GROUP_OWNER_DOC_ID = 'remoraGroupOwner';
+// Loose id validators (mesh/<domain>/<seg>, ugrp/<domain>/<seg>; default domain
+// is empty so the middle segment may be blank). Capped to bound the input.
+var REMORA_MESH_ID_RE = /^mesh\/[^/]*\/[^/]{1,256}$/;
+var REMORA_UGRP_ID_RE = /^ugrp\/[^/]*\/[^/]{1,256}$/;
 function isSuperAdminUser(u) { return !!u && u.siteadmin === 0xFFFFFFFF; }
 
 // v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
@@ -1501,6 +1512,79 @@ module.exports.remoraCore = function (parent) {
                             tag: tag, responseid: responseid,
                             result: 'ok', flags: REMORA_PERMISSION_FLAGS, roles: REMORA_ROLE_KEYS,
                             roleDefaults: doc.roleDefaults
+                        });
+                    });
+                });
+                return;
+            }
+            case 'groupOwnerList': {
+                // v0.14.0 (RC-15.M.6). Any signed-in user reads the
+                // groupId -> owner-usergroup map. It is not sensitive (just which
+                // usergroup owns a device group) and the UI needs it to gate the
+                // member-add affordance. Stored as a single site-wide doc.
+                var golUser = dbGet && dbGet.user;
+                if (!golUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupOwnerList',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session'
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_GROUP_OWNER_DOC_ID, function (golErr, golDocs) {
+                    var owners = (!golErr && golDocs && golDocs.length > 0 && golDocs[0].owners && typeof golDocs[0].owners === 'object') ? golDocs[0].owners : {};
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupOwnerList',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', owners: owners
+                    });
+                });
+                return;
+            }
+            case 'groupOwnerSet': {
+                // v0.14.0 (RC-15.M.6). Super-admin-only: set/clear the owner
+                // usergroup of one device group. ugrpId null/absent clears the
+                // owner. The OWNER usergroup is the one allowed to add members to
+                // the group (UI-authority in M.6; server-enforce patch later).
+                var gosUser = dbGet && dbGet.user;
+                if (!isSuperAdminUser(gosUser) || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupOwnerSet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var gosGroup = String(command.groupId || '');
+                var gosHasUgrp = Object.prototype.hasOwnProperty.call(command, 'ugrpId');
+                var gosUgrpRaw = command.ugrpId;
+                var gosClear = !gosHasUgrp || gosUgrpRaw === null || gosUgrpRaw === '';
+                if (!REMORA_MESH_ID_RE.test(gosGroup) || (!gosClear && !REMORA_UGRP_ID_RE.test(String(gosUgrpRaw)))) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupOwnerSet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_GROUP_OWNER_DOC_ID, function (gosErr, gosDocs) {
+                    var doc = (!gosErr && gosDocs && gosDocs.length > 0) ? gosDocs[0] : { _id: REMORA_GROUP_OWNER_DOC_ID, type: 'remoraGroupOwner' };
+                    if (!doc.owners || typeof doc.owners !== 'object') doc.owners = {};
+                    if (gosClear) {
+                        delete doc.owners[gosGroup];
+                    } else {
+                        doc.owners[gosGroup] = String(gosUgrpRaw);
+                    }
+                    obj.meshServer.db.Set(doc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'groupOwnerSet',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', owners: doc.owners
                         });
                     });
                 });
