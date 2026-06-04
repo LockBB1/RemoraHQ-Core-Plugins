@@ -34,7 +34,7 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.12.6';
+var PLUGIN_VERSION = '0.13.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -75,8 +75,22 @@ function savedFiltersDocId(userid) { return 'remoraSavedFilters:' + userid; }
 //   (the privileged plugin that runs the WinRM push), mirroring the
 //   canUseSystemTerminal enforce point. Registering it here makes it appear in
 //   permissionsSelf / permissionsList / the Access Policy UI automatically.
+//   v0.13.0 (RC-15.M.1) - Access rework: flags become "per-role default +
+//   per-user override". The doc gains a `roleDefaults` map
+//   `{ <role>: { <flag>: bool } }` alongside the per-user `grants`. Effective
+//   value = override (grants[user][flag], tri-state) ?? roleDefault[role][flag]
+//   ?? false. Resolution by RemoraHQ role lives client-side (UI gating) and,
+//   for the two server-enforced flags, independently in remoraTerminalBridge
+//   (security boundary). roleDefaults starts empty and has no setter UI before
+//   slot M.5, so effective == override == prior behaviour until then (additive,
+//   zero regression). permissionsSetFlag now accepts explicit `false`
+//   (force-off override) and `null` (clear -> inherit default).
 var REMORA_PERMISSIONS_DOC_ID = 'remoraPermissions';
 var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal', 'canRemoteInstall'];
+// Roles a super-admin may set defaults for. super_admin is excluded - it holds
+// every flag implicitly and is locked-on in the UI. Mirrors REMORA_ROLES in
+// src/lib/contracts/role.ts (minus super_admin).
+var REMORA_ROLE_KEYS = ['administrator', 'operator', 'viewer', 'auditor'];
 function isSuperAdminUser(u) { return !!u && u.siteadmin === 0xFFFFFFFF; }
 
 // v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
@@ -1307,29 +1321,38 @@ module.exports.remoraCore = function (parent) {
                     });
                     return;
                 }
-                var sendSelf = function (flags) {
+                // `flags` carries this user's per-user OVERRIDE (tri-state: a
+                // key present as true/false forces that value; absent = inherit
+                // the role default). `roleDefaults` is the full per-role map so
+                // the client can resolve effective = override ?? roleDefault
+                // ?? false against its own (client-derived) RemoraHQ role.
+                var sendSelf = function (flags, roleDefaults) {
                     session.send({
                         action: 'plugin', plugin: PLUGIN_SHORT_NAME,
                         pluginaction: 'permissionsSelf',
                         tag: tag, responseid: responseid,
-                        result: 'ok', flags: flags
+                        result: 'ok', flags: flags, roleDefaults: roleDefaults || {}
                     });
                 };
                 if (isSuperAdminUser(psUser)) {
                     var allFlags = {};
                     for (var sfI = 0; sfI < REMORA_PERMISSION_FLAGS.length; sfI++) allFlags[REMORA_PERMISSION_FLAGS[sfI]] = true;
-                    sendSelf(allFlags);
+                    sendSelf(allFlags, {});
                     return;
                 }
                 obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (err, docs) {
-                    var grants = (!err && docs && docs.length > 0 && docs[0].grants && typeof docs[0].grants === 'object') ? docs[0].grants : {};
+                    var doc0 = (!err && docs && docs.length > 0) ? docs[0] : null;
+                    var grants = (doc0 && doc0.grants && typeof doc0.grants === 'object') ? doc0.grants : {};
+                    var roleDefaults = (doc0 && doc0.roleDefaults && typeof doc0.roleDefaults === 'object') ? doc0.roleDefaults : {};
                     var mine = grants[psUser._id] || {};
                     var flags = {};
                     for (var fi = 0; fi < REMORA_PERMISSION_FLAGS.length; fi++) {
                         var fname = REMORA_PERMISSION_FLAGS[fi];
-                        flags[fname] = mine[fname] === true;
+                        // Preserve the tri-state: emit true/false only when the
+                        // user has an explicit override, omit otherwise.
+                        if (typeof mine[fname] === 'boolean') flags[fname] = mine[fname];
                     }
-                    sendSelf(flags);
+                    sendSelf(flags, roleDefaults);
                 });
                 return;
             }
@@ -1347,12 +1370,15 @@ module.exports.remoraCore = function (parent) {
                     return;
                 }
                 obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (err, docs) {
-                    var grants = (!err && docs && docs.length > 0 && docs[0].grants && typeof docs[0].grants === 'object') ? docs[0].grants : {};
+                    var doc0 = (!err && docs && docs.length > 0) ? docs[0] : null;
+                    var grants = (doc0 && doc0.grants && typeof doc0.grants === 'object') ? doc0.grants : {};
+                    var roleDefaults = (doc0 && doc0.roleDefaults && typeof doc0.roleDefaults === 'object') ? doc0.roleDefaults : {};
                     session.send({
                         action: 'plugin', plugin: PLUGIN_SHORT_NAME,
                         pluginaction: 'permissionsList',
                         tag: tag, responseid: responseid,
-                        result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: grants
+                        result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: grants,
+                        roleDefaults: roleDefaults, roles: REMORA_ROLE_KEYS
                     });
                 });
                 return;
@@ -1377,7 +1403,22 @@ module.exports.remoraCore = function (parent) {
                 // target. (HAR-confirmed, RC-14.29.2.)
                 var targetUserid = String(command.targetUser || '');
                 var targetFlag = String(command.flag || '');
-                var targetValue = command.value === true;
+                // Tri-state per-user override (v0.13.0): true = force-on,
+                // false = force-off, null/undefined = clear (inherit the role
+                // default). `false` previously meant "delete"; with role
+                // defaults it must persist as an explicit force-off.
+                var hasValue = Object.prototype.hasOwnProperty.call(command, 'value');
+                var rawValue = command.value;
+                var clearOverride = !hasValue || rawValue === null;
+                if (!clearOverride && rawValue !== true && rawValue !== false) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSetFlag',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
                 if (!targetUserid || REMORA_PERMISSION_FLAGS.indexOf(targetFlag) < 0) {
                     session.send({
                         action: 'plugin', plugin: PLUGIN_SHORT_NAME,
@@ -1390,12 +1431,14 @@ module.exports.remoraCore = function (parent) {
                 obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (gerr, gdocs) {
                     var doc = (!gerr && gdocs && gdocs.length > 0) ? gdocs[0] : { _id: REMORA_PERMISSIONS_DOC_ID, type: 'remoraPermissions' };
                     if (!doc.grants || typeof doc.grants !== 'object') doc.grants = {};
-                    if (targetValue) {
+                    if (clearOverride) {
+                        if (doc.grants[targetUserid]) {
+                            delete doc.grants[targetUserid][targetFlag];
+                            if (Object.keys(doc.grants[targetUserid]).length === 0) delete doc.grants[targetUserid];
+                        }
+                    } else {
                         if (!doc.grants[targetUserid] || typeof doc.grants[targetUserid] !== 'object') doc.grants[targetUserid] = {};
-                        doc.grants[targetUserid][targetFlag] = true;
-                    } else if (doc.grants[targetUserid]) {
-                        delete doc.grants[targetUserid][targetFlag];
-                        if (Object.keys(doc.grants[targetUserid]).length === 0) delete doc.grants[targetUserid];
+                        doc.grants[targetUserid][targetFlag] = rawValue;
                     }
                     obj.meshServer.db.Set(doc, function () {
                         session.send({
@@ -1403,6 +1446,61 @@ module.exports.remoraCore = function (parent) {
                             pluginaction: 'permissionsSetFlag',
                             tag: tag, responseid: responseid,
                             result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: doc.grants
+                        });
+                    });
+                });
+                return;
+            }
+            case 'permissionsSetRoleDefault': {
+                // v0.13.0 (RC-15.M.1). Super-admin-only: set/clear the default
+                // value of one whitelisted flag for one role. Stored under
+                // `roleDefaults[role][flag]`. value true/false = explicit
+                // default; null/absent = clear (flag inherits the hard-coded
+                // false). super_admin cannot be targeted (locked-on in UI).
+                var prdUser = dbGet && dbGet.user;
+                if (!isSuperAdminUser(prdUser) || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSetRoleDefault',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var prdRole = String(command.role || '');
+                var prdFlag = String(command.flag || '');
+                var prdHasValue = Object.prototype.hasOwnProperty.call(command, 'value');
+                var prdRaw = command.value;
+                var prdClear = !prdHasValue || prdRaw === null;
+                if (REMORA_ROLE_KEYS.indexOf(prdRole) < 0 || REMORA_PERMISSION_FLAGS.indexOf(prdFlag) < 0 ||
+                    (!prdClear && prdRaw !== true && prdRaw !== false)) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'permissionsSetRoleDefault',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_PERMISSIONS_DOC_ID, function (rderr, rddocs) {
+                    var doc = (!rderr && rddocs && rddocs.length > 0) ? rddocs[0] : { _id: REMORA_PERMISSIONS_DOC_ID, type: 'remoraPermissions' };
+                    if (!doc.roleDefaults || typeof doc.roleDefaults !== 'object') doc.roleDefaults = {};
+                    if (prdClear) {
+                        if (doc.roleDefaults[prdRole]) {
+                            delete doc.roleDefaults[prdRole][prdFlag];
+                            if (Object.keys(doc.roleDefaults[prdRole]).length === 0) delete doc.roleDefaults[prdRole];
+                        }
+                    } else {
+                        if (!doc.roleDefaults[prdRole] || typeof doc.roleDefaults[prdRole] !== 'object') doc.roleDefaults[prdRole] = {};
+                        doc.roleDefaults[prdRole][prdFlag] = prdRaw;
+                    }
+                    obj.meshServer.db.Set(doc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'permissionsSetRoleDefault',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', flags: REMORA_PERMISSION_FLAGS, roles: REMORA_ROLE_KEYS,
+                            roleDefaults: doc.roleDefaults
                         });
                     });
                 });
