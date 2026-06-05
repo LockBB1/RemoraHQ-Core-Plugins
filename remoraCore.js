@@ -20,7 +20,7 @@
  * so action/pluginaction echo is informational. We still echo both to keep traces
  * readable in DevTools.
  *
- * Server startup also runs a Mesh-patch verifier: if any of the three RemoraHQ
+ * Server startup also runs a Mesh-patch verifier: if any of the RemoraHQ
  * patches in .meshcentral/modificate/patches/ has been undone (typically by a
  * Mesh upgrade), the plugin dispatches a Critical event that surfaces in the
  * RemoraHQ Alerts feed (event.ts mapper registers `remora-mesh-patch-missing`
@@ -34,7 +34,9 @@ var fs = require('fs');
 var path = require('path');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
-var PLUGIN_VERSION = '0.14.0';
+// 0.14.1 (RC-15.SEC) — register two new Mesh patches in REMORA_PATCHES:
+//   meshuser-groupowner-enforce (SEC-1/2) + meshuser-changeuserpass-guard (SEC-3).
+var PLUGIN_VERSION = '0.14.1';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -227,6 +229,18 @@ var REMORA_PATCHES = [
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-addplugin-allowlist v1.0.0 BEGIN]',
         hint: 'Re-run .meshcentral/modificate/patches/meshuser-addplugin-allowlist.ps1'
+    },
+    {
+        name: 'meshuser-groupowner-enforce',
+        module: 'meshcentral/meshuser.js',
+        marker: '// [REMORAHQ-PATCH meshuser-groupowner-enforce v1.0.0 BEGIN]',
+        hint: 'Re-run .meshcentral/modificate/patches/meshuser-groupowner-enforce.ps1'
+    },
+    {
+        name: 'meshuser-changeuserpass-guard',
+        module: 'meshcentral/meshuser.js',
+        marker: '// [REMORAHQ-PATCH meshuser-changeuserpass-guard v1.0.0 BEGIN]',
+        hint: 'Re-run .meshcentral/modificate/patches/meshuser-changeuserpass-guard.ps1'
     }
 ];
 
