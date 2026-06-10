@@ -36,7 +36,7 @@ var path = require('path');
 var PLUGIN_SHORT_NAME = 'remoraCore';
 // 0.14.1 (RC-15.SEC) — register two new Mesh patches in REMORA_PATCHES:
 //   meshuser-groupowner-enforce (SEC-1/2) + meshuser-changeuserpass-guard (SEC-3).
-var PLUGIN_VERSION = '0.14.1';
+var PLUGIN_VERSION = '0.15.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -87,8 +87,13 @@ function savedFiltersDocId(userid) { return 'remoraSavedFilters:' + userid; }
 //   slot M.5, so effective == override == prior behaviour until then (additive,
 //   zero regression). permissionsSetFlag now accepts explicit `false`
 //   (force-off override) and `null` (clear -> inherit default).
+// v0.15.0 (N.1 #12) — third flag canManageDeviceSessions gates the operator
+//   "disconnect another user's session on a node" action (enforced + performed
+//   in remoraTerminalBridge.endDeviceSession). Registering it here makes it
+//   appear in the permission management UI (grants + roleDefaults). Default for
+//   every non-super-admin role is OFF (super-admin holds it implicitly).
 var REMORA_PERMISSIONS_DOC_ID = 'remoraPermissions';
-var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal', 'canRemoteInstall'];
+var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal', 'canRemoteInstall', 'canManageDeviceSessions'];
 // Roles a super-admin may set defaults for. super_admin is excluded - it holds
 // every flag implicitly and is locked-on in the UI. Mirrors REMORA_ROLES in
 // src/lib/contracts/role.ts (minus super_admin).
