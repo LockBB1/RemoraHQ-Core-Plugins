@@ -36,7 +36,11 @@ var path = require('path');
 var PLUGIN_SHORT_NAME = 'remoraCore';
 // 0.14.1 (RC-15.SEC) — register two new Mesh patches in REMORA_PATCHES:
 //   meshuser-groupowner-enforce (SEC-1/2) + meshuser-changeuserpass-guard (SEC-3).
-var PLUGIN_VERSION = '0.15.0';
+// 0.16.0 (Users Groups redesign Фаза 2 #88/#90) — groupMeta get/set (per-group
+//   extended metadata: owner/workEmail/messengers/notes) + deviceFolders get/set
+//   (shared per-machine-group folder view). New DB docs remoraGroupMeta:<ugrpId>
+//   and remoraDeviceFolders. No Mesh-patch changes.
+var PLUGIN_VERSION = '0.16.0';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -109,7 +113,67 @@ var REMORA_GROUP_OWNER_DOC_ID = 'remoraGroupOwner';
 // is empty so the middle segment may be blank). Capped to bound the input.
 var REMORA_MESH_ID_RE = /^mesh\/[^/]*\/[^/]{1,256}$/;
 var REMORA_UGRP_ID_RE = /^ugrp\/[^/]*\/[^/]{1,256}$/;
+var REMORA_NODE_ID_RE = /^node\/[^/]*\/[^/]{1,256}$/;
 function isSuperAdminUser(u) { return !!u && u.siteadmin === 0xFFFFFFFF; }
+
+// v0.16.0 (Users Groups redesign, Фаза 2 #88) — extended per-user-group
+// metadata Mesh has no notion of (Owner / Work Email / Messenger Links / Notes;
+// assets land later). Stored per group in its own doc, shared across the group
+// so every member sees the same data (replaces the Phase-1 localStorage view).
+// SITERIGHT_USERGROUPS (0x100) = "can manage user groups" — the write gate
+// alongside super-admin.
+var SITERIGHT_USERGROUPS = 0x100;
+function groupMetaDocId(ugrpId) { return 'remoraGroupMeta:' + ugrpId; }
+function canManageUserGroupsUser(u) { return isSuperAdminUser(u) || (!!u && ((u.siteadmin || 0) & SITERIGHT_USERGROUPS) !== 0); }
+function clampStr(v, max) { return (typeof v === 'string') ? v.slice(0, max) : ''; }
+function sanitizeGroupMeta(raw) {
+    var src = (raw && typeof raw === 'object') ? raw : {};
+    var messengers = [];
+    if (Array.isArray(src.messengers)) {
+        for (var i = 0; i < src.messengers.length && messengers.length < 20; i++) {
+            var m = src.messengers[i];
+            if (!m || typeof m !== 'object') continue;
+            var label = clampStr(m.label, 64).trim();
+            var url = clampStr(m.url, 512).trim();
+            if (label.length === 0 && url.length === 0) continue;
+            messengers.push({ label: label, url: url });
+        }
+    }
+    return {
+        owner: (typeof src.owner === 'string' && src.owner) ? src.owner.slice(0, 256) : null,
+        workEmail: clampStr(src.workEmail, 256).trim(),
+        messengers: messengers,
+        notes: clampStr(src.notes, 4000)
+    };
+}
+
+// v0.16.0 (#90) — shared device folders. Folders are a per-machine-group view
+// grouping (redesign §8.8 — not Mesh objects). One site-wide doc keyed by mesh:
+// meshes[<meshid>] = { folders:[name], assignments:{ <nodeid>: name } }. Shared
+// so every member of a Users Group sees the same folders (replaces Phase-1
+// localStorage). Read = any signed-in user; write = super OR a user with the
+// mesh in their links (i.e. who can see/manage that machine group).
+var REMORA_DEVICE_FOLDERS_DOC_ID = 'remoraDeviceFolders';
+function sanitizeFolderEntry(raw) {
+    var src = (raw && typeof raw === 'object') ? raw : {};
+    var folders = [];
+    if (Array.isArray(src.folders)) {
+        for (var i = 0; i < src.folders.length && folders.length < 100; i++) {
+            var name = clampStr(src.folders[i], 64).trim();
+            if (name.length > 0 && folders.indexOf(name) === -1) folders.push(name);
+        }
+    }
+    var assignments = {};
+    var rawAssign = (src.assignments && typeof src.assignments === 'object') ? src.assignments : {};
+    var keys = Object.keys(rawAssign);
+    for (var k = 0; k < keys.length && k < 2000; k++) {
+        var nodeId = keys[k];
+        if (!REMORA_NODE_ID_RE.test(nodeId)) continue;
+        var folder = clampStr(rawAssign[nodeId], 64).trim();
+        if (folder.length > 0 && folders.indexOf(folder) !== -1) assignments[nodeId] = folder;
+    }
+    return { folders: folders, assignments: assignments };
+}
 
 // v0.9.0 (RC-14.23). CSV cell escape — wraps in quotes and doubles inner
 // quotes when the value contains a delimiter, quote or newline. Numbers
@@ -1604,6 +1668,142 @@ module.exports.remoraCore = function (parent) {
                             pluginaction: 'groupOwnerSet',
                             tag: tag, responseid: responseid,
                             result: 'ok', owners: doc.owners
+                        });
+                    });
+                });
+                return;
+            }
+            case 'groupMetaGet': {
+                // v0.16.0 (#88). Read extended metadata for one user-group.
+                // Any signed-in user may read (not sensitive; UI needs it).
+                var gmgUser = dbGet && dbGet.user;
+                var gmgUgrp = String(command.ugrpId || '');
+                if (!gmgUser || !obj.meshServer || !obj.meshServer.db || !REMORA_UGRP_ID_RE.test(gmgUgrp)) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupMetaGet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(groupMetaDocId(gmgUgrp), function (gmgErr, gmgDocs) {
+                    var meta = (!gmgErr && gmgDocs && gmgDocs.length > 0) ? sanitizeGroupMeta(gmgDocs[0]) : sanitizeGroupMeta(null);
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupMetaGet',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', meta: meta
+                    });
+                });
+                return;
+            }
+            case 'groupMetaSet': {
+                // v0.16.0 (#88). Write extended metadata. Gate: super-admin OR a
+                // user with SITERIGHT_USERGROUPS (can manage user groups).
+                var gmsUser = dbGet && dbGet.user;
+                var gmsUgrp = String(command.ugrpId || '');
+                if (!canManageUserGroupsUser(gmsUser) || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupMetaSet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                if (!REMORA_UGRP_ID_RE.test(gmsUgrp)) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'groupMetaSet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'invalid-input'
+                    });
+                    return;
+                }
+                var gmsMeta = sanitizeGroupMeta(command.meta);
+                var gmsDocId = groupMetaDocId(gmsUgrp);
+                obj.meshServer.db.Get(gmsDocId, function (gmsErr, gmsDocs) {
+                    var doc = (!gmsErr && gmsDocs && gmsDocs.length > 0) ? gmsDocs[0] : { _id: gmsDocId, type: 'remoraGroupMeta', ugrpId: gmsUgrp };
+                    doc.owner = gmsMeta.owner;
+                    doc.workEmail = gmsMeta.workEmail;
+                    doc.messengers = gmsMeta.messengers;
+                    doc.notes = gmsMeta.notes;
+                    doc.updatedAt = Date.now();
+                    obj.meshServer.db.Set(doc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'groupMetaSet',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', meta: gmsMeta
+                        });
+                    });
+                });
+                return;
+            }
+            case 'deviceFoldersGet': {
+                // v0.16.0 (#90). Read the whole shared folder map (all meshes).
+                // Any signed-in user; client filters to meshes it can see.
+                var dfgUser = dbGet && dbGet.user;
+                if (!dfgUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'deviceFoldersGet',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', meshes: {}
+                    });
+                    return;
+                }
+                obj.meshServer.db.Get(REMORA_DEVICE_FOLDERS_DOC_ID, function (dfgErr, dfgDocs) {
+                    var meshes = (!dfgErr && dfgDocs && dfgDocs.length > 0 && dfgDocs[0].meshes && typeof dfgDocs[0].meshes === 'object') ? dfgDocs[0].meshes : {};
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'deviceFoldersGet',
+                        tag: tag, responseid: responseid,
+                        result: 'ok', meshes: meshes
+                    });
+                });
+                return;
+            }
+            case 'deviceFoldersSet': {
+                // v0.16.0 (#90). Replace one mesh's folder entry. Gate: super OR a
+                // user who has that mesh in their links (can see/manage it).
+                var dfsUser = dbGet && dbGet.user;
+                var dfsMesh = String(command.meshId || '');
+                if (!dfsUser || !obj.meshServer || !obj.meshServer.db) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'deviceFoldersSet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'no-session'
+                    });
+                    return;
+                }
+                var dfsAllowed = isSuperAdminUser(dfsUser) || (dfsUser.links && dfsUser.links[dfsMesh]);
+                if (!dfsAllowed || !REMORA_MESH_ID_RE.test(dfsMesh)) {
+                    session.send({
+                        action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                        pluginaction: 'deviceFoldersSet',
+                        tag: tag, responseid: responseid,
+                        result: 'error', error: 'forbidden'
+                    });
+                    return;
+                }
+                var dfsEntry = sanitizeFolderEntry(command);
+                obj.meshServer.db.Get(REMORA_DEVICE_FOLDERS_DOC_ID, function (dfsErr, dfsDocs) {
+                    var doc = (!dfsErr && dfsDocs && dfsDocs.length > 0) ? dfsDocs[0] : { _id: REMORA_DEVICE_FOLDERS_DOC_ID, type: 'remoraDeviceFolders' };
+                    if (!doc.meshes || typeof doc.meshes !== 'object') doc.meshes = {};
+                    if (dfsEntry.folders.length === 0 && Object.keys(dfsEntry.assignments).length === 0) {
+                        delete doc.meshes[dfsMesh];
+                    } else {
+                        doc.meshes[dfsMesh] = dfsEntry;
+                    }
+                    obj.meshServer.db.Set(doc, function () {
+                        session.send({
+                            action: 'plugin', plugin: PLUGIN_SHORT_NAME,
+                            pluginaction: 'deviceFoldersSet',
+                            tag: tag, responseid: responseid,
+                            result: 'ok', meshes: doc.meshes
                         });
                     });
                 });
