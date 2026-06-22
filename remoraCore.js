@@ -126,6 +126,17 @@ var SITERIGHT_USERGROUPS = 0x100;
 function groupMetaDocId(ugrpId) { return 'remoraGroupMeta:' + ugrpId; }
 function canManageUserGroupsUser(u) { return isSuperAdminUser(u) || (!!u && ((u.siteadmin || 0) & SITERIGHT_USERGROUPS) !== 0); }
 function clampStr(v, max) { return (typeof v === 'string') ? v.slice(0, max) : ''; }
+// Reject javascript:/data:/etc. messenger hrefs server-side (defence in depth
+// with the client safeUrl). Allow only navigable schemes; scheme-less is fine
+// (client prefixes https). Returns '' for an unsafe url so the label survives.
+var REMORA_SAFE_URL_SCHEMES = ['http:', 'https:', 'mailto:', 'tel:', 'sms:', 'tg:', 'skype:', 'whatsapp:', 'msteams:'];
+function safeMessengerUrl(raw) {
+    var v = clampStr(raw, 512).trim();
+    if (v.length === 0) return '';
+    var m = /^([a-z][a-z0-9+.-]*):/i.exec(v);
+    if (!m) return v; // scheme-less — client treats as https
+    return (REMORA_SAFE_URL_SCHEMES.indexOf(m[1].toLowerCase() + ':') !== -1) ? v : '';
+}
 function sanitizeGroupMeta(raw) {
     var src = (raw && typeof raw === 'object') ? raw : {};
     var messengers = [];
@@ -134,7 +145,7 @@ function sanitizeGroupMeta(raw) {
             var m = src.messengers[i];
             if (!m || typeof m !== 'object') continue;
             var label = clampStr(m.label, 64).trim();
-            var url = clampStr(m.url, 512).trim();
+            var url = safeMessengerUrl(m.url);
             if (label.length === 0 && url.length === 0) continue;
             messengers.push({ label: label, url: url });
         }
