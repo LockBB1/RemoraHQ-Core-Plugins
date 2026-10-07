@@ -229,6 +229,18 @@ function checkVerifyPwRateLimit(userid) {
     return { allowed: true, retryAfterSec: 0 };
 }
 
+// Own-account TOTP verification has the same small attempt budget as password
+// re-auth, but a separate bucket so the two gates do not starve each other.
+var verifyTotpAttempts = Object.create(null);
+function checkVerifyTotpRateLimit(userid) {
+    var now = Date.now();
+    var entry = verifyTotpAttempts[userid];
+    if (!entry || now >= entry.resetAt) { entry = verifyTotpAttempts[userid] = { count: 0, resetAt: now + 60000 }; }
+    if (entry.count >= 5) return false;
+    entry.count++;
+    return true;
+}
+
 function notificationsDocId(userId) {
     return 'remoraNotifications:' + String(userId);
 }
@@ -547,9 +559,7 @@ module.exports.remoraCore = function (parent) {
                 // v0.4.0 (RC-13.4): re-verify the signed-in user's currently
                 // enrolled TOTP code. Used as the second factor in the gate
                 // before disable / regenerate / clear backup codes.
-                // Reads the stored otpsecret from the user record and runs
-                // otplib.authenticator.check — same logic Mesh uses in the
-                // login flow (meshuser.js:3772).
+                // Read the stored secret from the authenticated user's record.
                 var sessionObj = dbGet;
                 var token = typeof command.token === 'string' ? command.token : '';
                 var failTotp = {
@@ -564,12 +574,12 @@ module.exports.remoraCore = function (parent) {
                 if (!/^\d{6}$/.test(token)) { session.send(failTotp); return; }
                 var u = sessionObj && sessionObj.user;
                 if (!u || typeof u.otpsecret !== 'string') { session.send(failTotp); return; }
+                if (!checkVerifyTotpRateLimit(u._id)) { session.send(failTotp); return; }
                 var otplib = null;
-                try { otplib = require('otplib'); } catch (e) { otplib = null; }
+                try { otplib = require(require.resolve('otplib', { paths: [path.dirname(obj.meshServer.webPublicPath)] })); } catch (e) { otplib = null; }
                 if (otplib == null) { session.send(failTotp); return; }
                 try {
-                    otplib.authenticator.options = { window: 2 };
-                    var ok = otplib.authenticator.check(token, u.otpsecret) === true;
+                    var verified = otplib.verifySync({ secret: u.otpsecret, token: token, epochTolerance: 60 });
                     session.send({
                         action: 'plugin',
                         plugin: PLUGIN_SHORT_NAME,
@@ -577,7 +587,7 @@ module.exports.remoraCore = function (parent) {
                         tag: tag,
                         responseid: responseid,
                         result: 'ok',
-                        valid: ok
+                        valid: verified.valid === true
                     });
                 } catch (e) {
                     session.send(failTotp);
