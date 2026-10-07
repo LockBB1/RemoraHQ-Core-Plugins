@@ -9,9 +9,11 @@ Provide the **plugin channel** between the RemoraHQ web UI and MeshCentral.
 Subsequent RemoraHQ plugins (Alert State, Auditor Role, Reports, Terminal
 Bridge) extend the same wire format.
 
-This release ships `ping` plus Mesh patch verification. On server startup,
-the plugin checks the required RemoraHQ MeshCentral patches and emits a
-domain-scoped critical event when any marker is missing.
+The plugin provides the RemoraHQ command channel, including `ping` and
+MeshCentral patch verification. At startup it checks five required source
+markers and, when MongoDB change streams are enabled, checks whether delete
+pre-images are available. Missing requirements produce a domain-scoped
+critical event. The `verifyMeshPatches` plugin action returns the same report.
 
 ## Identity
 
@@ -51,7 +53,7 @@ Server → Client:
   "responseid": "<correlation-id>",
   "result": "ok",
   "pong": true,
-  "version": "0.2.1",
+  "version": "0.16.0",
   "server_time": "2026-05-15T14:00:00.000Z"
 }
 ```
@@ -61,25 +63,32 @@ Correlation is purely by `tag` / `responseid` on the RemoraHQ side.
 
 ## Install (development)
 
-MeshCentral picks up plugins from `meshcentral/plugins/<shortName>/`. The
-folder name **must** match `config.json::shortName` — i.e. `remoraCore` here,
-not the repo folder name. Symlink under the correct name:
+MeshCentral picks up plugins from `<datapath>/plugins/<shortName>/`. The folder
+name **must** match `config.json::shortName` — `remoraCore` here, not the repo
+folder name. For a local Git checkout, use a directory junction under the
+explicit test datapath:
 
 ```powershell
-# from MeshCentral root
-New-Item -ItemType SymbolicLink `
-  -Path .\plugins\remoraCore `
-  -Target "D:\…\RemoraHQ-Core-Plugins"
+# Example: both paths must be chosen for the local test environment.
+New-Item -ItemType Junction `
+  -Path '<datapath>\plugins\remoraCore' `
+  -Target '<workspace>\.plugins\RemoraHQ-Core-Plugins'
 ```
 
-Enable the plugin runtime in `meshcentral-data/config.json`:
+Enable the plugin runtime in `<datapath>/config.json`:
 
 ```jsonc
-{ "settings": { "plugins": { "enabled": true } } }
+{ "settings": { "plugins": { "enabled": true, "list": ["remoraCore"] } } }
 ```
 
-Restart MeshCentral. The plugin should appear under `Admin → Plugins` in
-the upstream MeshCentral UI and in the RemoraHQ admin UI.
+Restart MeshCentral. With `settings.plugins.list`, MeshCentral loads the
+plugin from the local folder at startup. Core resolves patch targets from
+the running MeshCentral source tree, including a direct Git checkout. The
+MeshCentral 1.2.6 overlay and reapply procedure are in
+`../../.utils/patches/README.md`; older full-file copies must not replace
+upstream files. MongoDB delete events require MongoDB 6.0+ with
+`changeStreamPreAndPostImages` enabled on the main collection. Other local
+databases do not use that MongoDB condition.
 
 ## License
 

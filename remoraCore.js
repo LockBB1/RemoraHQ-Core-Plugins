@@ -20,12 +20,10 @@
  * so action/pluginaction echo is informational. We still echo both to keep traces
  * readable in DevTools.
  *
- * Server startup also runs a Mesh-patch verifier: if any of the RemoraHQ
- * patches in .meshcentral/modificate/patches/ has been undone (typically by a
- * Mesh upgrade), the plugin dispatches a Critical event that surfaces in the
- * RemoraHQ Alerts feed (event.ts mapper registers `remora-mesh-patch-missing`
- * as a critical alert action). See verify-mesh-patches.ps1 for the standalone
- * companion ops can run manually after every Mesh upgrade.
+ * Server startup also runs a Mesh-patch verifier. The MeshCentral 1.2.6
+ * overlay lives in .utils/patches/. If a source marker or required MongoDB
+ * pre-image setting is missing, the plugin dispatches a Critical event that
+ * surfaces in the RemoraHQ Alerts feed.
  */
 
 'use strict';
@@ -296,31 +294,31 @@ var REMORA_PATCHES = [
         name: 'pluginhandler-getpluginpermissions-guard',
         module: 'meshcentral/pluginHandler.js',
         marker: '// [REMORAHQ-PATCH pluginhandler-getpluginpermissions-guard v1.0.0 BEGIN]',
-        hint: 'Re-run .meshcentral/modificate/patches/pluginhandler-getpluginpermissions-guard.ps1'
+        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
     },
     {
         name: 'db-changestream-delete',
         module: 'meshcentral/db.js',
         marker: 'MODIFIED FOR REMORAHQ',
-        hint: 'Copy .meshcentral/modificate/db.js over node_modules/meshcentral/db.js'
+        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
     },
     {
         name: 'meshuser-addplugin-allowlist',
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-addplugin-allowlist v1.0.0 BEGIN]',
-        hint: 'Re-run .meshcentral/modificate/patches/meshuser-addplugin-allowlist.ps1'
+        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
     },
     {
         name: 'meshuser-groupowner-enforce',
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-groupowner-enforce v1.0.0 BEGIN]',
-        hint: 'Re-run .meshcentral/modificate/patches/meshuser-groupowner-enforce.ps1'
+        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
     },
     {
         name: 'meshuser-changeuserpass-guard',
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-changeuserpass-guard v1.0.0 BEGIN]',
-        hint: 'Re-run .meshcentral/modificate/patches/meshuser-changeuserpass-guard.ps1'
+        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
     }
 ];
 
@@ -328,7 +326,16 @@ var REMORA_PATCHES = [
  * Resolve the on-disk path of a Mesh module from the plugin's process. Returns
  * null if the module can't be located — caller treats null as "patch missing".
  */
-function resolveModulePath(moduleName) {
+function resolveModulePath(moduleName, meshServer) {
+    // MeshCentral may run directly from a Git checkout, where it is not an
+    // installed package and require.resolve('meshcentral/...') cannot find it.
+    if (meshServer && typeof meshServer.webPublicPath === 'string' && moduleName.indexOf('meshcentral/') === 0) {
+        var relative = moduleName.substring('meshcentral/'.length);
+        if (!/^[A-Za-z0-9/_-]+\.js$/.test(relative)) return null;
+        var root = path.dirname(meshServer.webPublicPath);
+        var candidate = path.resolve(root, relative);
+        if (fs.existsSync(candidate)) return candidate;
+    }
     try {
         return require.resolve(moduleName);
     } catch (_e) {
@@ -342,12 +349,12 @@ function resolveModulePath(moduleName) {
  * The check never throws — anything we can't verify is reported as missing,
  * so a stale Mesh install doesn't silently boot in degraded mode.
  */
-function verifyMeshPatches() {
+function verifyMeshPatches(meshServer) {
     var missing = [];
     var present = [];
     for (var i = 0; i < REMORA_PATCHES.length; i++) {
         var patch = REMORA_PATCHES[i];
-        var modulePath = resolveModulePath(patch.module);
+        var modulePath = resolveModulePath(patch.module, meshServer);
         if (!modulePath) {
             missing.push({ name: patch.name, hint: patch.hint, reason: 'module-not-resolved' });
             continue;
@@ -365,6 +372,15 @@ function verifyMeshPatches() {
             // only the error code (ENOENT/EACCES/...), no path, no raw message.
             missing.push({ name: patch.name, hint: patch.hint, reason: 'read-error: ' + (e && e.code ? e.code : 'unknown') });
         }
+    }
+    // A source marker alone cannot prove that MongoDB can supply delete
+    // pre-images. The db.js overlay inspects the server and collection first.
+    if (meshServer && meshServer.db && meshServer.db.remoraDbDeleteEventsRequired === true && meshServer.db.remoraDbDeleteEventsReady !== true) {
+        missing.push({
+            name: 'db-changestream-delete-runtime',
+            hint: 'Use MongoDB 6.0+ and enable changeStreamPreAndPostImages on the MeshCentral main collection before restarting MeshCentral.',
+            reason: 'pre-images-unavailable'
+        });
     }
     return { ok: missing.length === 0, missing: missing, present: present };
 }
@@ -384,7 +400,7 @@ function dispatchMissingPatchAlert(obj, report, missingNames) {
         obj.meshServer.DispatchEvent(['*', 'server-users'], obj, {
             etype: 'server',
             action: 'remora-mesh-patch-missing',
-            msg: 'RemoraHQ Mesh patches missing: ' + missingNames + '. Re-apply patches from .meshcentral/modificate/patches/ and restart Mesh. See server log for fix hints.',
+            msg: 'RemoraHQ Mesh patches missing: ' + missingNames + '. Reapply the verified 1.2.6 overlay from .utils/patches/ and restart Mesh. See server log for fix hints.',
             msgArgs: report.missing,
             domain: domainIds[i]
         });
@@ -406,7 +422,7 @@ module.exports.remoraCore = function (parent) {
      */
     obj.server_startup = function () {
         console.log('[remoraCore] v' + PLUGIN_VERSION + ' loaded.');
-        var report = verifyMeshPatches();
+        var report = verifyMeshPatches(obj.meshServer);
         if (report.ok) {
             console.log('[remoraCore] Mesh patches verified: ' + report.present.join(', '));
             return;
@@ -515,7 +531,7 @@ module.exports.remoraCore = function (parent) {
                 return;
             }
             case 'verifyMeshPatches': {
-                var report = verifyMeshPatches();
+                var report = verifyMeshPatches(obj.meshServer);
                 session.send({
                     action: 'plugin',
                     plugin: PLUGIN_SHORT_NAME,
