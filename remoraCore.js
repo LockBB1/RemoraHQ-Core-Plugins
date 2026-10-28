@@ -20,8 +20,8 @@
  * so action/pluginaction echo is informational. We still echo both to keep traces
  * readable in DevTools.
  *
- * Server startup also runs a Mesh-patch verifier. The MeshCentral 1.2.6
- * overlay lives in .utils/patches/. If a source marker or required MongoDB
+ * Server startup also runs a Mesh-patch verifier. The MeshCentral 1.3.1 overlay
+ * lives in .setup/modules/meshcentral-overlay/. If a source marker or required MongoDB
  * pre-image setting is missing, the plugin dispatches a Critical event that
  * surfaces in the RemoraHQ Alerts feed.
  */
@@ -38,7 +38,8 @@ var PLUGIN_SHORT_NAME = 'remoraCore';
 //   extended metadata: owner/workEmail/messengers/notes) + deviceFolders get/set
 //   (shared per-machine-group folder view). New DB docs remoraGroupMeta:<ugrpId>
 //   and remoraDeviceFolders. No Mesh-patch changes.
-var PLUGIN_VERSION = '0.16.0';
+// 0.16.1 — monitor required SPA step-up, Chat, Event Logs and Desktop source anchors.
+var PLUGIN_VERSION = '0.16.1';
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -301,36 +302,79 @@ function appendNotificationDirect(obj, userId, msgid, kind, payload, cb) {
  * is shadowed and no longer a dependency. Patch file kept for rollback. See
  * .documentation/RemoraHQ 2/INFRA/NGINX-SETUP.md.
  */
+var MESH_PATCH_HINT = 'Verify the matching MeshCentral 1.3.1 setup module and follow its README before reapplying the overlay. Preserve Device Policy enforcement; base Install is not supported over policy. Restart MeshCentral after an approved update; source checks do not confirm endpoint delivery.';
 var REMORA_PATCHES = [
     {
         name: 'pluginhandler-getpluginpermissions-guard',
         module: 'meshcentral/pluginHandler.js',
         marker: '// [REMORAHQ-PATCH pluginhandler-getpluginpermissions-guard v1.0.0 BEGIN]',
-        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
+        hint: MESH_PATCH_HINT
     },
     {
         name: 'db-changestream-delete',
         module: 'meshcentral/db.js',
         marker: 'MODIFIED FOR REMORAHQ',
-        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
+        hint: MESH_PATCH_HINT
     },
     {
         name: 'meshuser-addplugin-allowlist',
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-addplugin-allowlist v1.0.0 BEGIN]',
-        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
+        hint: MESH_PATCH_HINT
     },
     {
         name: 'meshuser-groupowner-enforce',
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-groupowner-enforce v1.0.0 BEGIN]',
-        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
+        hint: MESH_PATCH_HINT
     },
     {
         name: 'meshuser-changeuserpass-guard',
         module: 'meshcentral/meshuser.js',
         marker: '// [REMORAHQ-PATCH meshuser-changeuserpass-guard v1.0.0 BEGIN]',
-        hint: 'Reapply the verified MeshCentral 1.2.6 overlay from .utils/patches/meshcentral-1.2.6-core.patch'
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'meshuser-session-security-stepup',
+        module: 'meshcentral/meshuser.js',
+        marker: "'sessionSecurityStepUp': serverCommandSessionSecurityStepUp,",
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'webserver-stepup-persist',
+        module: 'meshcentral/webserver.js',
+        marker: "obj.app.post(url + 'stepup-persist.ashx', obj.bodyParser.urlencoded({ extended: false, limit: '4kb' }), handleStepUpPersistRequest);",
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'meshcore-chat-protocol11',
+        module: 'meshcentral/agents/meshcore.js',
+        marker: 'remoraChatStart(this, _chatOp);',
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'meshcore-eventlog',
+        module: 'meshcentral/agents/meshcore.js',
+        marker: "mesh.SendCommand({ action: 'msg', type: 'eventlog', sessionid: elSession, tag: elTag,",
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'meshcore-eventlog-native-buffer',
+        module: 'meshcentral/agents/meshcore.js',
+        marker: "var buffer = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.concat([chunk]);",
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'meshcore-desktop-local-end',
+        module: 'meshcentral/agents/meshcore.js',
+        marker: 'remoraEndDesktopByLocalUser(this.httprequest.desktop.kvm);',
+        hint: MESH_PATCH_HINT
+    },
+    {
+        name: 'meshrelay-desktop-local-end',
+        module: 'meshcentral/meshrelay.js',
+        marker: 'this.peer.send(\'{"ctrlChannel":"102938","type":"remoraDesktopEnded","version":1}\', finishLocalEnd);',
+        hint: MESH_PATCH_HINT
     }
 ];
 
@@ -412,7 +456,7 @@ function dispatchMissingPatchAlert(obj, report, missingNames) {
         obj.meshServer.DispatchEvent(['*', 'server-users'], obj, {
             etype: 'server',
             action: 'remora-mesh-patch-missing',
-            msg: 'RemoraHQ Mesh patches missing: ' + missingNames + '. Reapply the verified 1.2.6 overlay from .utils/patches/ and restart Mesh. See server log for fix hints.',
+            msg: 'RemoraHQ Mesh patches missing: ' + missingNames + '. Review the matching MeshCentral 1.3.1 setup module before reapplying patches. See server log for fix hints.',
             msgArgs: report.missing,
             domain: domainIds[i]
         });
