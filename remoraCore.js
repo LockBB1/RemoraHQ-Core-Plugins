@@ -30,6 +30,7 @@
 
 var fs = require('fs');
 var path = require('path');
+var crypto = require('crypto');
 
 var PLUGIN_SHORT_NAME = 'remoraCore';
 // 0.14.1 (RC-15.SEC) — register two new Mesh patches in REMORA_PATCHES:
@@ -39,7 +40,130 @@ var PLUGIN_SHORT_NAME = 'remoraCore';
 //   (shared per-machine-group folder view). New DB docs remoraGroupMeta:<ugrpId>
 //   and remoraDeviceFolders. No Mesh-patch changes.
 // 0.16.1 — monitor required SPA step-up, Chat, Event Logs and Desktop source anchors.
-var PLUGIN_VERSION = '0.16.1';
+var PLUGIN_VERSION = '0.17.0';
+
+// The cursor is local to this Core process. A different peer/restart requires Refresh.
+async function userEventsPage(command, session, meshServer, cursorKey) {
+    var user = session.user;
+    function error(code) { return { result: 'error', error: code }; }
+    function allowed() {
+        var current = meshServer && meshServer.webserver && meshServer.webserver.users ? meshServer.webserver.users[user._id] : session.user;
+        return !!session.user && session.user._id === user._id && !!current && ((current.siteadmin || 0) & 2) !== 0 && (current.domain || '') === domain;
+    }
+    if (!user || typeof user._id !== 'string' || ((user.siteadmin || 0) & 2) === 0) return error('forbidden');
+    var domain = user.domain || '';
+    if (!allowed()) return error('forbidden');
+    var target = command.targetUser;
+    var filter = command.filter == null ? null : command.filter;
+    if (typeof target !== 'string' || target.length > 256 || target.split('/').length !== 3 || target.split('/')[0] !== 'user' || target.split('/')[1] !== domain || !target.split('/')[2]) return error('invalid-target');
+    if (filter !== null && ['agentlog', 'relaylog'].indexOf(filter) < 0) return error('invalid-filter');
+    if (command.pageSize != null && command.pageSize !== 50) return error('invalid-page-size');
+    var db = meshServer && meshServer.db;
+    if (!db || db.databaseType !== 3 || !db.eventsfile || typeof db.eventsfile.find !== 'function') return error('unsupported-db');
+    var ObjectId;
+    try { ObjectId = require(require.resolve('mongodb', { paths: [path.dirname(meshServer.webPublicPath)] })).ObjectId; }
+    catch (_) { return error('unsupported-db'); }
+    var now = Date.now(), state = { v: 1, actor: user._id, domain: domain, target: target, filter: filter, upper: now, expires: now + 1800000 };
+    if (command.cursor != null) {
+        try {
+            if (typeof command.cursor !== 'string' || command.cursor.length > 2048 || !/^[A-Za-z0-9_-]+$/.test(command.cursor)) return error('invalid-cursor');
+            var bytes = Buffer.from(command.cursor, 'base64url');
+            var decipher = crypto.createDecipheriv('aes-256-gcm', cursorKey, bytes.subarray(0, 12));
+            decipher.setAuthTag(bytes.subarray(12, 28));
+            state = JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8'));
+            if (state.v !== 1 || state.actor !== user._id || state.domain !== domain || state.target !== target || state.filter !== filter || !Number.isFinite(state.upper) || !Number.isFinite(state.expires) || state.expires < now || state.upper > now || !Number.isFinite(state.time) || !/^[a-f0-9]{24}$/.test(state.id) || ['next', 'previous'].indexOf(state.direction) < 0) return error('invalid-cursor');
+        } catch (_) { return error('invalid-cursor'); }
+    }
+    var scope = { domain: domain, $or: [{ ids: { $in: [target] } }, { userid: target }] };
+    if (filter !== null) scope.action = filter;
+    function query(predicate, sort, limit, projection) {
+        return db.eventsfile.find(predicate).project(projection).sort(sort).limit(limit).maxTimeMS(5000).toArray();
+    }
+    try {
+        // Fail honestly on incompatible historical keys instead of silently losing records.
+        if (!state.id) {
+            var invalid = await query({ $and: [scope, { $or: [{ time: { $not: { $type: 'date' } } }, { _id: { $not: { $type: 'objectId' } } }] }] }, { _id: 1 }, 1, { _id: 1 });
+            if (!allowed()) return error('forbidden');
+            if (invalid.length) return error('unsupported-history');
+        }
+        var backwards = state.direction === 'previous';
+        var timeBounds = { $lte: new Date(state.upper) };
+        if (state.id) {
+            if (backwards) timeBounds.$gte = new Date(state.time);
+            else timeBounds.$lte = new Date(Math.min(state.upper, state.time));
+        }
+        var predicates = [scope, { time: timeBounds }];
+        if (state.id) {
+            var compare = backwards ? '$gt' : '$lt';
+            var byTime = {}, byId = {};
+            byTime[compare] = new Date(state.time); byId[compare] = new ObjectId(state.id);
+            predicates.push({ $or: [{ time: byTime }, { time: new Date(state.time), _id: byId }] });
+        }
+        var docs = [], events = [], more = false, eventBytes = 2;
+        function cursor(doc, direction) {
+            var next = Object.assign({}, state, { time: doc.time.getTime(), id: doc._id.toHexString(), direction: direction });
+            var iv = crypto.randomBytes(12), cipher = crypto.createCipheriv('aes-256-gcm', cursorKey, iv);
+            var encrypted = Buffer.concat([cipher.update(JSON.stringify(next), 'utf8'), cipher.final()]);
+            return Buffer.concat([iv, cipher.getAuthTag(), encrypted]).toString('base64url');
+        }
+        function displayEvent(doc) {
+            var event = { time: doc.time.toISOString(), payloadTruncated: false };
+            ['action', 'etype', 'userid', 'nodeid', 'meshid', 'username', 'msg', 'ipaddr'].forEach(function (field) {
+                if (doc[field] == null) return;
+                if (typeof doc[field] !== 'string') { event.payloadTruncated = true; return; }
+                // Bound response bytes even for a pathological historical event; keep its row/cursor.
+                var max = field === 'msg' ? 8192 : 256;
+                event[field] = doc[field].slice(0, max);
+                if (doc[field].length > max) event.payloadTruncated = true;
+            });
+            if (doc.msgid != null) {
+                if (Number.isFinite(doc.msgid)) event.msgid = doc.msgid; else event.payloadTruncated = true;
+            }
+            if (doc.msgArgs != null) {
+                if (!Array.isArray(doc.msgArgs)) { event.payloadTruncated = true; }
+                else {
+                    if (doc.msgArgs.length > 32) event.payloadTruncated = true;
+                    event.msgArgs = doc.msgArgs.slice(0, 32).map(function (value) {
+                        try { if (Buffer.byteLength(JSON.stringify(value), 'utf8') <= 4096) return value; } catch (_) { }
+                        event.payloadTruncated = true;
+                        return null;
+                    });
+                }
+            }
+            if (doc.account != null) {
+                event.account = {};
+                ['name', 'realname'].forEach(function (field) {
+                    if (doc.account[field] == null) return;
+                    if (typeof doc.account[field] === 'string') {
+                        event.account[field] = doc.account[field].slice(0, 256);
+                        if (doc.account[field].length > 256) event.payloadTruncated = true;
+                    } else event.payloadTruncated = true;
+                });
+                if (Number.isFinite(doc.account.siteadmin)) event.account.siteadmin = doc.account.siteadmin;
+                else if (doc.account.siteadmin != null) event.payloadTruncated = true;
+            }
+            return event;
+        }
+        // Stream one BSON document per batch; never retain 51 potentially 16-MiB raw documents.
+        var reader = db.eventsfile.find({ $and: predicates }).project({ _id: 1, time: 1, action: 1, etype: 1, userid: 1, nodeid: 1, meshid: 1, username: 1, msg: 1, ipaddr: 1, msgid: 1, msgArgs: 1, 'account.name': 1, 'account.realname': 1, 'account.siteadmin': 1 }).sort({ time: backwards ? 1 : -1, _id: backwards ? 1 : -1 }).limit(51).maxTimeMS(5000).batchSize(1);
+        try {
+            for await (var doc of reader) {
+                if (!allowed()) return error('forbidden');
+                if (events.length === 50) { more = true; break; }
+                var event = displayEvent(doc);
+                var bytesUsed = Buffer.byteLength(JSON.stringify(event), 'utf8') + 1;
+                if (events.length && eventBytes + bytesUsed > 524288) { more = true; break; }
+                events.push(event); eventBytes += bytesUsed;
+                docs.push({ time: doc.time, _id: doc._id });
+            }
+        } finally { await reader.close(); }
+        if (!allowed()) return error('forbidden');
+        if (backwards) { docs.reverse(); events.reverse(); }
+        return { result: 'ok', protocol: 1, targetUser: target, filter: filter, events: events,
+            nextCursor: docs.length && (backwards || more) ? cursor(docs[docs.length - 1], 'next') : null,
+            previousCursor: docs.length && (backwards ? more : !!state.id) ? cursor(docs[0], 'previous') : null };
+    } catch (_) { return error('history-query-failed'); }
+}
 
 // RC-13.17 — Mesh-native default for event TTL (.meshcentral/origin/meshcentral/db.js:51).
 // Mirrored here so we can report a meaningful retention value when the admin
@@ -467,6 +591,7 @@ module.exports.remoraCore = function (parent) {
     var obj = {};
     obj.parent = parent;
     obj.meshServer = parent.parent;
+    var userEventsCursorKey = crypto.randomBytes(32);
 
     obj.exports = ['serveraction'];
 
@@ -582,7 +707,16 @@ module.exports.remoraCore = function (parent) {
                     result: 'ok',
                     pong: true,
                     version: PLUGIN_VERSION,
+                    capabilities: { userEventsPage: 1 },
                     server_time: new Date().toISOString()
+                });
+                return;
+            }
+            case 'userEventsPage': {
+                userEventsPage(command, session, obj.meshServer, userEventsCursorKey).then(function (result) {
+                    try { session.send(Object.assign({ action: 'plugin', plugin: PLUGIN_SHORT_NAME, pluginaction: 'userEventsPage', tag: tag, responseid: responseid }, result)); } catch (_) { }
+                }).catch(function () {
+                    try { session.send({ action: 'plugin', plugin: PLUGIN_SHORT_NAME, pluginaction: 'userEventsPage', tag: tag, responseid: responseid, result: 'error', error: 'history-query-failed' }); } catch (_) { }
                 });
                 return;
             }
