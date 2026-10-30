@@ -1,7 +1,7 @@
 {
   "name": "RemoraHQ - Core",
   "shortName": "remoraCore",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "description": "RemoraHQ infrastructure shell. Exposes a ping action used by the RemoraHQ UI to verify the plugin channel end-to-end. On server start, verifies required MeshCentral 1.3.1 source anchors and conditional MongoDB delete prerequisites, and dispatches a domain-scoped critical Alert if any cannot be verified. Source markers do not prove execution or endpoint delivery. Subsequent RemoraHQ plugins (Alert State, Auditor, Reports, Terminal Bridge) extend this core.",
   "hasAdminPanel": false,
   "homepage": "https://github.com/lockbb1/RemoraHQ-Core-Plugins",

@@ -40,7 +40,7 @@ var PLUGIN_SHORT_NAME = 'remoraCore';
 //   (shared per-machine-group folder view). New DB docs remoraGroupMeta:<ugrpId>
 //   and remoraDeviceFolders. No Mesh-patch changes.
 // 0.16.1 — monitor required SPA step-up, Chat, Event Logs and Desktop source anchors.
-var PLUGIN_VERSION = '0.17.0';
+var PLUGIN_VERSION = '0.18.0';
 
 // The cursor is local to this Core process. A different peer/restart requires Refresh.
 async function userEventsPage(command, session, meshServer, cursorKey) {
@@ -220,7 +220,22 @@ function savedFiltersDocId(userid) { return 'remoraSavedFilters:' + userid; }
 //   appear in the permission management UI (grants + roleDefaults). Default for
 //   every non-super-admin role is OFF (super-admin holds it implicitly).
 var REMORA_PERMISSIONS_DOC_ID = 'remoraPermissions';
-var REMORA_PERMISSION_FLAGS = ['canUseSystemTerminal', 'canRemoteInstall', 'canManageDeviceSessions'];
+var REMORA_PERMISSION_FLAGS = ['canRemoteInstall', 'canManageDeviceSessions'];
+// Public read projection only: retired permission data stays in the DB but
+// cannot be granted, inherited, or echoed as an active capability.
+function publicPermissionMaps(maps) {
+    var out = Object.create(null);
+    if (!maps || typeof maps !== 'object') return out;
+    Object.keys(maps).forEach(function (key) {
+        var values = maps[key], clean = Object.create(null);
+        if (!values || typeof values !== 'object') return;
+        REMORA_PERMISSION_FLAGS.forEach(function (flag) {
+            if (typeof values[flag] === 'boolean') clean[flag] = values[flag];
+        });
+        out[key] = clean;
+    });
+    return out;
+}
 // Roles a super-admin may set defaults for. super_admin is excluded - it holds
 // every flag implicitly and is locked-on in the UI. Mirrors REMORA_ROLES in
 // src/lib/contracts/role.ts (minus super_admin).
@@ -1640,7 +1655,7 @@ module.exports.remoraCore = function (parent) {
                         action: 'plugin', plugin: PLUGIN_SHORT_NAME,
                         pluginaction: 'permissionsSelf',
                         tag: tag, responseid: responseid,
-                        result: 'ok', flags: flags, roleDefaults: roleDefaults || {}
+                        result: 'ok', flags: flags, roleDefaults: publicPermissionMaps(roleDefaults)
                     });
                 };
                 if (isSuperAdminUser(psUser)) {
@@ -1686,8 +1701,8 @@ module.exports.remoraCore = function (parent) {
                         action: 'plugin', plugin: PLUGIN_SHORT_NAME,
                         pluginaction: 'permissionsList',
                         tag: tag, responseid: responseid,
-                        result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: grants,
-                        roleDefaults: roleDefaults, roles: REMORA_ROLE_KEYS
+                        result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: publicPermissionMaps(grants),
+                        roleDefaults: publicPermissionMaps(roleDefaults), roles: REMORA_ROLE_KEYS
                     });
                 });
                 return;
@@ -1754,7 +1769,7 @@ module.exports.remoraCore = function (parent) {
                             action: 'plugin', plugin: PLUGIN_SHORT_NAME,
                             pluginaction: 'permissionsSetFlag',
                             tag: tag, responseid: responseid,
-                            result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: doc.grants
+                            result: 'ok', flags: REMORA_PERMISSION_FLAGS, grants: publicPermissionMaps(doc.grants)
                         });
                     });
                 });
@@ -1809,7 +1824,7 @@ module.exports.remoraCore = function (parent) {
                             pluginaction: 'permissionsSetRoleDefault',
                             tag: tag, responseid: responseid,
                             result: 'ok', flags: REMORA_PERMISSION_FLAGS, roles: REMORA_ROLE_KEYS,
-                            roleDefaults: doc.roleDefaults
+                            roleDefaults: publicPermissionMaps(doc.roleDefaults)
                         });
                     });
                 });

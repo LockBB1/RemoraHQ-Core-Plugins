@@ -53,13 +53,18 @@ Server → Client:
   "responseid": "<correlation-id>",
   "result": "ok",
   "pong": true,
-  "version": "0.17.0",
+  "version": "0.18.0",
   "server_time": "2026-05-15T14:00:00.000Z"
 }
 ```
 
 MeshCentral routes by `command.plugin` to `obj.serveraction(command, dbGet, ws)`.
 Correlation is purely by `tag` / `responseid` on the RemoraHQ side.
+
+Core 0.18.0 removes `canUseSystemTerminal` from supported permission flags.
+Legacy stored values remain in the database but are not exposed or accepted by
+the permission API. Terminal Bridge and the matching SPA must also be updated;
+this does not restrict the native MeshCentral relay.
 
 ## Install (development)
 
@@ -215,4 +220,4 @@ An optional third path records synthetic 100k/250k query measurements. Do not
 point this fixture at application settings or a working database. No server
 or live database was used to validate this pilot outside the disposable test
 container. Package/npm version 0.12.6 remains the historical package identity;
-runtime/config plugin version is 0.17.0, following the existing release layout.
+runtime/config plugin version is 0.18.0, following the existing release layout.
